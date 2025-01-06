@@ -1,6 +1,5 @@
 #!/usr/bin/env python
-"""
-Inference script.
+"""Inference script.
 
 To run with base.yaml as the config,
 
@@ -15,28 +14,34 @@ See https://hydra.cc/docs/advanced/hydra-command-line-flags/ for more options.
 
 """
 
+import glob
+import logging
+import os
+import pickle
+import random
 import re
-import os, time, pickle
+import time
+
+import hydra
+import numpy as np
 import torch
 from omegaconf import OmegaConf
-import hydra
-import logging
-from rfdiffusion.util import writepdb_multi, writepdb
+
+from rfdiffusion.config_schema import BaseConfig, register_configs
 from rfdiffusion.inference import utils as iu
-from hydra.core.hydra_config import HydraConfig
-import numpy as np
-import random
-import glob
+from rfdiffusion.util import writepdb, writepdb_multi
+
+register_configs()
 
 
-def make_deterministic(seed=0):
+def make_deterministic(seed=0):  # noqa: D103
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
 
 
 @hydra.main(version_base=None, config_path="../config/inference", config_name="base")
-def main(conf: HydraConfig) -> None:
+def main(conf: BaseConfig) -> None:  # noqa: D103
     log = logging.getLogger(__name__)
     if conf.inference.deterministic:
         make_deterministic()
@@ -44,7 +49,9 @@ def main(conf: HydraConfig) -> None:
     # Check for available GPU and print result of check
     if torch.cuda.is_available():
         device_name = torch.cuda.get_device_name(torch.cuda.current_device())
-        log.info(f"Found GPU with device_name {device_name}. Will run RFdiffusion on {device_name}")
+        log.info(
+            f"Found GPU with device_name {device_name}. Will run RFdiffusion on {device_name}"
+        )
     else:
         log.info("////////////////////////////////////////////////")
         log.info("///// NO GPU DETECTED! Falling back to CPU /////")
@@ -60,7 +67,7 @@ def main(conf: HydraConfig) -> None:
         indices = [-1]
         for e in existing:
             print(e)
-            m = re.match(".*_(\d+)\.pdb$", e)
+            m = re.match(r".*_(\d+)\.pdb$", e)
             print(m)
             if not m:
                 continue

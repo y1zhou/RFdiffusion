@@ -12,6 +12,7 @@ from omegaconf import DictConfig
 from scipy.spatial.transform import Rotation as scipy_R
 
 from rfdiffusion import util
+from rfdiffusion.config_schema import BaseConfig
 from rfdiffusion.diffusion import get_beta_schedule
 from rfdiffusion.inference import model_runners
 from rfdiffusion.potentials.manager import PotentialManager
@@ -519,7 +520,7 @@ class Denoise:
         return fullatom_next.squeeze()[:, :14, :], px0
 
 
-def sampler_selector(conf: DictConfig):
+def sampler_selector(conf: BaseConfig):
     """Select the sampler based on the configuration."""
     if conf.scaffoldguided.scaffoldguided:
         sampler = model_runners.ScaffoldedSampler(conf)
