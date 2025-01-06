@@ -14,3 +14,10 @@ tests/reference_outputs/
 tests/target_folds
 tests/tim_barrel_scaffold
 tests/tests_*
+
+build/
+dist/
+examples/outputs/
+examples/example_outputs/
+outputs/
+.vscode/

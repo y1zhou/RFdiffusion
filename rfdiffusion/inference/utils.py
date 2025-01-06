@@ -1,17 +1,21 @@
-import numpy as np
-import os
-from omegaconf import DictConfig
-import torch
-import torch.nn.functional as nn
-from rfdiffusion.diffusion import get_beta_schedule
-from scipy.spatial.transform import Rotation as scipy_R
-from rfdiffusion.util import rigid_from_3_points
-from rfdiffusion.util_module import ComputeAllAtomCoords
-from rfdiffusion import util
-import random
-import logging
-from rfdiffusion.inference import model_runners
+"""Utility functions for inference."""
+
 import glob
+import logging
+import os
+import random
+from typing import Optional
+
+import numpy as np
+import torch
+from omegaconf import DictConfig
+from scipy.spatial.transform import Rotation as scipy_R
+
+from rfdiffusion import util
+from rfdiffusion.diffusion import get_beta_schedule
+from rfdiffusion.inference import model_runners
+from rfdiffusion.potentials.manager import PotentialManager
+from rfdiffusion.util import rigid_from_3_points
 
 ###########################################################
 #### Functions which can be called outside of Denoiser ####
@@ -19,9 +23,7 @@ import glob
 
 
 def get_next_frames(xt, px0, t, diffuser, so3_type, diffusion_mask, noise_scale=1.0):
-    """
-    get_next_frames gets updated frames using IGSO(3) + score_based reverse diffusion.
-
+    """get_next_frames gets updated frames using IGSO(3) + score_based reverse diffusion.
 
     based on self.so3_type use score based update.
 
@@ -62,18 +64,18 @@ def get_next_frames(xt, px0, t, diffuser, so3_type, diffusion_mask, noise_scale=
     # Sample next frame for each residue
     if so3_type == "igso3":
         # don't do calculations on masked positions since they end up as identity matrix
-        all_rot_transitions[
-            ~diffusion_mask
-        ] = diffuser.so3_diffuser.reverse_sample_vectorized(
-            R_t[~diffusion_mask],
-            R_0[~diffusion_mask],
-            t,
-            noise_level=noise_scale,
-            mask=None,
-            return_perturb=True,
+        all_rot_transitions[~diffusion_mask] = (
+            diffuser.so3_diffuser.reverse_sample_vectorized(
+                R_t[~diffusion_mask],
+                R_0[~diffusion_mask],
+                t,
+                noise_level=noise_scale,
+                mask=None,
+                return_perturb=True,
+            )
         )
     else:
-        assert False, "so3 diffusion type %s not implemented" % so3_type
+        raise ValueError(f"so3 diffusion type {so3_type} not implemented")
 
     all_rot_transitions = all_rot_transitions[:, None, :, :]
 
@@ -92,9 +94,9 @@ def get_next_frames(xt, px0, t, diffuser, so3_type, diffusion_mask, noise_scale=
 
 
 def get_mu_xt_x0(xt, px0, t, beta_schedule, alphabar_schedule, eps=1e-6):
-    """
-    Given xt, predicted x0 and the timestep t, give mu of x(t-1)
-    Assumes t is 0 indexed
+    """Given xt, predicted x0, and the timestep t, give mu of x(t-1).
+
+    Assumes t is 0 indexed.
     """
     # sigma is predefined from beta. Often referred to as beta tilde t
     t_idx = t - 1
@@ -132,8 +134,7 @@ def get_next_ca(
     alphabar_schedule,
     noise_scale=1.0,
 ):
-    """
-    Given full atom x0 prediction (xyz coordinates), diffuse to x(t-1)
+    """Given full atom x0 prediction (xyz coordinates), diffuse to x(t-1).
 
     Parameters:
 
@@ -152,8 +153,8 @@ def get_next_ca(
         noise_scale: scale factor for the noise being added
 
     """
-    get_allatom = ComputeAllAtomCoords().to(device=xt.device)
-    L = len(xt)
+    # get_allatom = ComputeAllAtomCoords().to(device=xt.device)
+    # L = len(xt)
 
     # bring to origin after global alignment (when don't have a motif) or replace input motif and bring to origin, and then scale
     px0 = px0 * crd_scale
@@ -167,7 +168,7 @@ def get_next_ca(
     sampled_crds = torch.normal(mu, torch.sqrt(sigma * noise_scale))
     delta = sampled_crds - xt[:, 1, :]  # check sign of this is correct
 
-    if not diffusion_mask is None:
+    if diffusion_mask is not None:
         # Don't move motif
         delta[diffusion_mask, ...] = 0
 
@@ -177,8 +178,7 @@ def get_next_ca(
 
 
 def get_noise_schedule(T, noiseT, noise1, schedule_type):
-    """
-    Function to create a schedule that varies the scale of noise given to the model over time
+    """Function to create a schedule that varies the scale of noise given to the model over time.
 
     Parameters:
 
@@ -191,26 +191,25 @@ def get_noise_schedule(T, noiseT, noise1, schedule_type):
         schedule_type: The type of function to use to interpolate between noiseT and noise1
 
     Returns:
-
         noise_schedule: A function which maps timestep to noise scale
 
     """
-
     noise_schedules = {
         "constant": lambda t: noiseT,
         "linear": lambda t: ((t - 1) / (T - 1)) * (noiseT - noise1) + noise1,
     }
 
-    assert (
-        schedule_type in noise_schedules
-    ), f"noise_schedule must be one of {noise_schedules.keys()}. Received noise_schedule={schedule_type}. Exiting."
+    if schedule_type not in noise_schedules:
+        raise ValueError(
+            f"noise_schedule must be one of {noise_schedules.keys()}. Received noise_schedule={schedule_type}. Exiting."
+        )
 
     return noise_schedules[schedule_type]
 
 
 class Denoise:
-    """
-    Class for getting x(t-1) from predicted x0 and x(t)
+    """Class for getting x(t-1) from predicted x0 and x(t).
+
     Strategy:
         Ca coordinates: Rediffuse to x(t-1) from predicted x0
         Frames: Approximate update from rotation score
@@ -232,7 +231,7 @@ class Denoise:
         noise_level=0.5,
         schedule_type="linear",
         so3_schedule_type="linear",
-        schedule_kwargs={},
+        schedule_kwargs=None,
         so3_type="igso3",
         noise_scale_ca=1.0,
         final_noise_scale_ca=1,
@@ -241,16 +240,38 @@ class Denoise:
         final_noise_scale_frame=0.5,
         frame_noise_schedule_type="constant",
         crd_scale=1 / 15,
-        potential_manager=None,
+        potential_manager: Optional[PotentialManager] = None,
         partial_T=None,
     ):
-        """
+        """Initialize the diffusion process parameters.
 
         Parameters:
-            noise_level: scaling on the noise added (set to 0 to use no noise,
-                to 1 to have full noise)
-
+        T (int): Number of timesteps.
+        L (int): Length of the sequence.
+        diffuser (object): Diffuser object.
+        b_0 (float, optional): Initial beta value. Default is 0.001.
+        b_T (float, optional): Final beta value. Default is 0.1.
+        min_b (float, optional): Minimum beta value. Default is 1.0.
+        max_b (float, optional): Maximum beta value. Default is 12.5.
+        min_sigma (float, optional): Minimum sigma value. Default is 0.05.
+        max_sigma (float, optional): Maximum sigma value. Default is 1.5.
+        noise_level (float, optional): Scaling on the noise added. Set to 0 to use no noise, to 1 to have full noise. Default is 0.5.
+        schedule_type (str, optional): Type of schedule for beta. Default is "linear".
+        so3_schedule_type (str, optional): Type of schedule for SO3. Default is "linear".
+        schedule_kwargs (dict, optional): Additional keyword arguments for the schedule. Default is {}.
+        so3_type (str, optional): Type of SO3. Default is "igso3".
+        noise_scale_ca (float, optional): Noise scale for CA. Default is 1.0.
+        final_noise_scale_ca (float, optional): Final noise scale for CA. Default is 1.
+        ca_noise_schedule_type (str, optional): Noise schedule type for CA. Default is "constant".
+        noise_scale_frame (float, optional): Noise scale for frame. Default is 0.5.
+        final_noise_scale_frame (float, optional): Final noise scale for frame. Default is 0.5.
+        frame_noise_schedule_type (str, optional): Noise schedule type for frame. Default is "constant".
+        crd_scale (float, optional): Coordinate scale. Default is 1/15.
+        potential_manager (Optional[PotentialManager], optional): Potential manager object. Default is None.
+        partial_T (optional): Partial timesteps. Default is None.
         """
+        if schedule_kwargs is None:
+            schedule_kwargs = {}
         self.T = T
         self.L = L
         self.diffuser = diffuser
@@ -266,7 +287,7 @@ class Denoise:
         self.noise_scale_frame = noise_scale_frame
         self.final_noise_scale_frame = final_noise_scale_frame
         self.frame_noise_schedule_type = frame_noise_schedule_type
-        self.potential_manager = potential_manager
+        self.potential_manager: PotentialManager = potential_manager  # type: ignore
         self._log = logging.getLogger(__name__)
 
         self.schedule, self.alpha_schedule, self.alphabar_schedule = get_beta_schedule(
@@ -287,12 +308,13 @@ class Denoise:
         )
 
     @property
-    def idx2steps(self):
-        return self.decode_scheduler.idx2steps.numpy()
+    def idx2steps(self):  # noqa: D102
+        return self.decode_scheduler.idx2steps.numpy()  # type: ignore
 
     def align_to_xt_motif(self, px0, xT, diffusion_mask, eps=1e-6):
-        """
-        Need to align px0 to motif in xT. This is to permit the swapping of residue positions in the px0 motif for the true coordinates.
+        """Need to align px0 to motif in xT.
+
+        This is to permit the swapping of residue positions in the px0 motif for the true coordinates.
         First, get rotation matrix from px0 to xT for the motif residues.
         Second, rotate px0 (whole structure) by that rotation matrix
         Third, centre at origin
@@ -303,9 +325,8 @@ class Denoise:
             N = V.shape[-2]
             return np.sqrt(np.sum((V - W) * (V - W), axis=(-2, -1)) / N + eps)
 
-        assert (
-            xT.shape[1] == px0.shape[1]
-        ), f"xT has shape {xT.shape} and px0 has shape {px0.shape}"
+        if xT.shape[1] != px0.shape[1]:
+            raise ValueError(f"xT has shape {xT.shape} and px0 has shape {px0.shape}")
 
         L, n_atom, _ = xT.shape  # A is number of atoms
         atom_mask = ~torch.isnan(px0)
@@ -361,10 +382,9 @@ class Denoise:
         return torch.Tensor(px0_)
 
     def get_potential_gradients(self, xyz, diffusion_mask):
-        """
-        This could be moved into potential manager if desired - NRB
+        """Function to take a structure (x) and get per-atom gradients used to guide diffusion update.
 
-        Function to take a structure (x) and get per-atom gradients used to guide diffusion update
+        This could be moved into potential manager if desired - NRB
 
         Inputs:
 
@@ -374,16 +394,15 @@ class Denoise:
 
             Ca_grads (torch.tensor): [L,3] The gradient at each Ca atom
         """
-
-        if self.potential_manager == None or self.potential_manager.is_empty():
+        if self.potential_manager is None or self.potential_manager.is_empty():
             return torch.zeros(xyz.shape[0], 3)
 
-        use_Cb = False
+        # use_Cb = False
 
         # seq.requires_grad = True
         xyz.requires_grad = True
 
-        if not xyz.grad is None:
+        if xyz.grad is not None:
             xyz.grad.zero_()
 
         current_potential = self.potential_manager.compute_all_potentials(xyz)
@@ -393,7 +412,7 @@ class Denoise:
         # Need access to calculated Cb coordinates to be able to get Cb grads though
         Ca_grads = xyz.grad[:, 1, :]
 
-        if not diffusion_mask == None:
+        if diffusion_mask is not None:
             Ca_grads[diffusion_mask, :] = 0
 
         # check for NaN's
@@ -413,8 +432,8 @@ class Denoise:
         align_motif=True,
         include_motif_sidechains=True,
     ):
-        """
-        Wrapper function to take px0, xt and t, and to produce xt-1
+        """Wrapper function to take px0, xt and t, and to produce xt-1.
+
         First, aligns px0 to xt
         Then gets coordinates, frames and torsion angles
 
@@ -434,11 +453,10 @@ class Denoise:
 
             include_motif_sidechains (bool): Provide sidechains of the fixed motif to the model
         """
-
-        get_allatom = ComputeAllAtomCoords().to(device=xt.device)
+        # get_allatom = ComputeAllAtomCoords().to(device=xt.device)
         L, n_atom = xt.shape[:2]
-        assert (xt.shape[1] == 14) or (xt.shape[1] == 27)
-        assert (px0.shape[1] == 14) or (px0.shape[1] == 27)
+        assert (xt.shape[1] == 14) or (xt.shape[1] == 27)  # noqa: S101
+        assert (px0.shape[1] == 14) or (px0.shape[1] == 27)  # noqa: S101
 
         ###############################
         ### Align pX0 onto Xt motif ###
@@ -493,7 +511,7 @@ class Denoise:
         fullatom_next = torch.full_like(xt, float("nan")).unsqueeze(0)
         fullatom_next[:, :, :3] = frames_next[None]
         # This is never used so just make it a fudged tensor - NRB
-        torsions_next = torch.zeros(1, 1)
+        # torsions_next = torch.zeros(1, 1)
 
         if include_motif_sidechains:
             fullatom_next[:, diffusion_mask, :14] = xt[None, diffusion_mask]
@@ -502,6 +520,7 @@ class Denoise:
 
 
 def sampler_selector(conf: DictConfig):
+    """Select the sampler based on the configuration."""
     if conf.scaffoldguided.scaffoldguided:
         sampler = model_runners.ScaffoldedSampler(conf)
     else:
@@ -512,21 +531,22 @@ def sampler_selector(conf: DictConfig):
         elif conf.inference.model_runner == "ScaffoldedSampler":
             sampler = model_runners.ScaffoldedSampler(conf)
         else:
-            raise ValueError(f"Unrecognized sampler {conf.model_runner}")
+            raise ValueError(f"Unrecognized sampler {conf.inference.model_runner}")
     return sampler
 
 
 def parse_pdb(filename, **kwargs):
-    """extract xyz coords for all heavy atoms"""
-    with open(filename,"r") as f:
-        lines=f.readlines()
+    """Extract xyz coords for all heavy atoms."""
+    with open(filename) as f:
+        lines = f.readlines()
     return parse_pdb_lines(lines, **kwargs)
 
 
 def parse_pdb_lines(lines, parse_hetatom=False, ignore_het_h=True):
+    """Extract input features from lines of a PDB file."""
     # indices of residues observed in the structure
-    res, pdb_idx = [],[]
-    for l in lines:
+    res, pdb_idx = [], []
+    for l in lines:  # noqa: E741
         if l[:4] == "ATOM" and l[12:16].strip() == "CA":
             res.append((l[22:26], l[17:20]))
             # chain letter, res num
@@ -534,13 +554,13 @@ def parse_pdb_lines(lines, parse_hetatom=False, ignore_het_h=True):
     seq = [util.aa2num[r[1]] if r[1] in util.aa2num.keys() else 20 for r in res]
     pdb_idx = [
         (l[21:22].strip(), int(l[22:26].strip()))
-        for l in lines
+        for l in lines  # noqa: E741
         if l[:4] == "ATOM" and l[12:16].strip() == "CA"
     ]  # chain letter, res num
 
     # 4 BB + up to 10 SC atoms
     xyz = np.full((len(res), 14, 3), np.nan, dtype=np.float32)
-    for l in lines:
+    for l in lines:  # noqa: E741
         if l[:4] != "ATOM":
             continue
         chain, resNo, atom, aa = (
@@ -549,16 +569,18 @@ def parse_pdb_lines(lines, parse_hetatom=False, ignore_het_h=True):
             " " + l[12:16].strip().ljust(3),
             l[17:20],
         )
-        if (chain,resNo) in pdb_idx:
+        if (chain, resNo) in pdb_idx:
             idx = pdb_idx.index((chain, resNo))
             # for i_atm, tgtatm in enumerate(util.aa2long[util.aa2num[aa]]):
-            for i_atm, tgtatm in enumerate(
-                util.aa2long[util.aa2num[aa]][:14]
-                ):
+            for i_atm, tgtatm in enumerate(util.aa2long[util.aa2num[aa]][:14]):
                 if (
                     tgtatm is not None and tgtatm.strip() == atom.strip()
-                    ):  # ignore whitespace
-                    xyz[idx, i_atm, :] = [float(l[30:38]), float(l[38:46]), float(l[46:54])]
+                ):  # ignore whitespace
+                    xyz[idx, i_atm, :] = [
+                        float(l[30:38]),
+                        float(l[38:46]),
+                        float(l[46:54]),
+                    ]
                     break
 
     # save atom mask
@@ -592,7 +614,7 @@ def parse_pdb_lines(lines, parse_hetatom=False, ignore_het_h=True):
     # heteroatoms (ligands, etc)
     if parse_hetatom:
         xyz_het, info_het = [], []
-        for l in lines:
+        for l in lines:  # noqa: E741
             if l[:6] == "HETATM" and not (ignore_het_h and l[77] == "H"):
                 info_het.append(
                     dict(
@@ -611,6 +633,7 @@ def parse_pdb_lines(lines, parse_hetatom=False, ignore_het_h=True):
 
 
 def process_target(pdb_path, parse_hetatom=False, center=True):
+    """Prepare features for the target protein."""
     # Read target pdb and extract features.
     target_struct = parse_pdb(pdb_path, parse_hetatom=parse_hetatom)
 
@@ -642,16 +665,14 @@ def process_target(pdb_path, parse_hetatom=False, center=True):
 
 
 def get_idx0_hotspots(mappings, ppi_conf, binderlen):
-    """
-    Take pdb-indexed hotspot resudes and the length of the binder, and makes the 0-indexed tensor of hotspots
-    """
-
+    """Take pdb-indexed hotspot resudes and the length of the binder, and makes the 0-indexed tensor of hotspots."""
     hotspot_idx = None
     if binderlen > 0:
         if ppi_conf.hotspot_res is not None:
-            assert all(
-                [i[0].isalpha() for i in ppi_conf.hotspot_res]
-            ), "Hotspot residues need to be provided in pdb-indexed form. E.g. A100,A103"
+            if not all([i[0].isalpha() for i in ppi_conf.hotspot_res]):
+                raise ValueError(
+                    "Hotspot residues need to be provided in pdb-indexed form. E.g. A100,A103"
+                )
             hotspots = [(i[0], int(i[1:])) for i in ppi_conf.hotspot_res]
             hotspot_idx = []
             for i, res in enumerate(mappings["receptor_con_ref_pdb_idx"]):
@@ -661,10 +682,11 @@ def get_idx0_hotspots(mappings, ppi_conf, binderlen):
 
 
 class BlockAdjacency:
-    """
-    Class for handling PPI design inference with ss/block_adj inputs.
+    """Class for handling PPI design inference with ss/block_adj inputs.
+
     Basic idea is to provide a list of scaffolds, and to output ss and adjacency
     matrices based off of these, while sampling additional lengths.
+
     Inputs:
         - scaffold_list: list of scaffolds (e.g. ['2kl8','1cif']). Can also be a .txt file.
         - scaffold dir: directory where scaffold ss and adj are precalculated
@@ -675,6 +697,7 @@ class BlockAdjacency:
         - num_designs: how many designs are you wanting to generate? Currently only used for bookkeeping
         - systematic: do you want to systematically work through the list of scaffolds, or randomly sample (default)
         - num_designs_per_input: Not really implemented yet. Maybe not necessary
+
     Outputs:
         - L: new length of chain to be diffused
         - ss: all loops and insertions, and ends of ss blocks (up to ss_mask) set to mask token (3). Onehot encoded. (L,4)
@@ -682,22 +705,21 @@ class BlockAdjacency:
     """
 
     def __init__(self, conf, num_designs):
+        """Initialize the BlockAdjacency class.
+
+        inputs:
+           conf.scaffold_list as conf
+           conf.inference.num_designs for sanity checking
         """
-        Parameters:
-          inputs:
-             conf.scaffold_list as conf
-             conf.inference.num_designs for sanity checking
-        """
-       
-        self.conf=conf 
+        self.conf = conf
         # either list or path to .txt file with list of scaffolds
         if self.conf.scaffoldguided.scaffold_list is not None:
-            if type(self.conf.scaffoldguided.scaffold_list) == list:
-                self.scaffold_list = scaffold_list
+            if isinstance(self.conf.scaffoldguided.scaffold_list, list):
+                self.scaffold_list = self.conf.scaffoldguided.scaffold_list
             elif self.conf.scaffoldguided.scaffold_list[-4:] == ".txt":
                 # txt file with list of ids
                 list_from_file = []
-                with open(self.conf.scaffoldguided.scaffold_list, "r") as f:
+                with open(self.conf.scaffoldguided.scaffold_list) as f:
                     for line in f:
                         list_from_file.append(line.strip())
                 self.scaffold_list = list_from_file
@@ -720,7 +742,10 @@ class BlockAdjacency:
                 int(str(self.conf.scaffoldguided.sampled_insertion).split("-")[1]),
             ]
         else:
-            self.sampled_insertion = [0, int(self.conf.scaffoldguided.sampled_insertion)]
+            self.sampled_insertion = [
+                0,
+                int(self.conf.scaffoldguided.sampled_insertion),
+            ]
 
         # maximum sampled insertion at N- and C-terminus
         if "-" in str(self.conf.scaffoldguided.sampled_N):
@@ -760,17 +785,21 @@ class BlockAdjacency:
 
         # whether to mask loops or not
         if not self.conf.scaffoldguided.mask_loops:
-            assert self.conf.scaffoldguided.sampled_N == 0, "can't add length if not masking loops"
-            assert self.conf.scaffoldguided.sampled_C == 0, "can't add lemgth if not masking loops"
-            assert self.conf.scaffoldguided.sampled_insertion == 0, "can't add length if not masking loops"
+            if any(
+                v != 0
+                for v in (
+                    self.conf.scaffoldguided.sampled_N,
+                    self.conf.scaffoldguided.sampled_C,
+                    self.conf.scaffoldguided.sampled_insertion,
+                )
+            ):
+                raise ValueError("can't add length if not masking loops")
             self.mask_loops = False
         else:
             self.mask_loops = True
 
     def get_ss_adj(self, item):
-        """
-        Given at item, get the ss tensor and block adjacency matrix for that item
-        """
+        """Given at item, get the ss tensor and block adjacency matrix for that item."""
         ss = torch.load(os.path.join(self.scaffold_dir, f'{item.split(".")[0]}_ss.pt'))
         adj = torch.load(
             os.path.join(self.scaffold_dir, f'{item.split(".")[0]}_adj.pt')
@@ -779,9 +808,7 @@ class BlockAdjacency:
         return ss, adj
 
     def mask_to_segments(self, mask):
-        """
-        Takes a mask of True (loop) and False (non-loop), and outputs list of tuples (loop or not, length of element)
-        """
+        """Takes a mask of True (loop) and False (non-loop), and outputs list of tuples (loop or not, length of element)."""
         segments = []
         begin = -1
         end = -1
@@ -808,11 +835,9 @@ class BlockAdjacency:
         return segments
 
     def expand_mask(self, mask, segments):
-        """
-        Function to generate a new mask with dilated loops and N and C terminal additions
-        """
-        N_add = random.randint(self.sampled_N[0], self.sampled_N[1])
-        C_add = random.randint(self.sampled_C[0], self.sampled_C[1])
+        """Function to generate a new mask with dilated loops and N and C terminal additions."""
+        N_add = random.randint(self.sampled_N[0], self.sampled_N[1])  # noqa: S311
+        C_add = random.randint(self.sampled_C[0], self.sampled_C[1])  # noqa: S311
 
         output = N_add * [False]
         for ss, length in segments:
@@ -820,18 +845,16 @@ class BlockAdjacency:
                 output.extend(length * [True])
             else:
                 # randomly sample insertion length
-                ins = random.randint(
+                ins = random.randint(  # noqa: S311
                     self.sampled_insertion[0], self.sampled_insertion[1]
                 )
                 output.extend((length + ins) * [False])
         output.extend(C_add * [False])
-        assert torch.sum(torch.tensor(output)) == torch.sum(~mask)
+        assert torch.sum(torch.tensor(output)) == torch.sum(~mask)  # noqa: S101
         return torch.tensor(output)
 
     def expand_ss(self, ss, adj, mask, expanded_mask):
-        """
-        Given an expanded mask, populate a new ss and adj based on this
-        """
+        """Given an expanded mask, populate a new ss and adj based on this."""
         ss_out = torch.ones(expanded_mask.shape[0]) * 3  # set to mask token
         adj_out = torch.full((expanded_mask.shape[0], expanded_mask.shape[0]), 0.0)
         ss_out[expanded_mask] = ss[~mask]
@@ -850,9 +873,7 @@ class BlockAdjacency:
         return ss_out, adj_out
 
     def mask_ss_adj(self, ss, adj, expanded_mask):
-        """
-        Given an expanded ss and adj, mask some number of residues at either end of non-loop ss
-        """
+        """Given an expanded ss and adj, mask some number of residues at either end of non-loop ss."""
         original_mask = torch.clone(expanded_mask)
         if self.ss_mask > 0:
             for i in range(1, self.ss_mask + 1):
@@ -871,16 +892,13 @@ class BlockAdjacency:
         return ss, adj
 
     def get_scaffold(self):
-        """
-        Wrapper method for pulling an item from the list, and preparing ss and block adj features
-        """
-        
+        """Wrapper method for pulling an item from the list, and preparing ss and block adj features."""
         # Handle determinism. Useful for integration tests
         if self.conf.inference.deterministic:
             torch.manual_seed(self.num_completed)
             np.random.seed(self.num_completed)
             random.seed(self.num_completed)
-  
+
         if self.systematic:
             # reset if num designs > num_scaffolds
             if self.item_n >= len(self.scaffold_list):
@@ -888,11 +906,11 @@ class BlockAdjacency:
             item = self.scaffold_list[self.item_n]
             self.item_n += 1
         else:
-            item = random.choice(self.scaffold_list)
+            item = random.choice(self.scaffold_list)  # noqa: S311
         print("Scaffold constrained based on file: ", item)
         # load files
         ss, adj = self.get_ss_adj(item)
-        adj_orig = torch.clone(adj)
+        # adj_orig = torch.clone(adj)
         # separate into segments (loop or not)
         mask = torch.where(ss == 2, 1, 0).bool()
         segments = self.mask_to_segments(mask)
@@ -913,8 +931,8 @@ class BlockAdjacency:
 
 
 class Target:
-    """
-    Class to handle targets (fixed chains).
+    """Class to handle targets (fixed chains).
+
     Inputs:
         - path to pdb file
         - hotspot residues, in the form B10,B12,B60 etc
@@ -923,7 +941,7 @@ class Target:
         - Dictionary of xyz coordinates, indices, pdb_indices, pdb mask
     """
 
-    def __init__(self, conf: DictConfig, hotspots=None):
+    def __init__(self, conf: DictConfig, hotspots=None):  # noqa: D107
         self.pdb = parse_pdb(conf.target_path)
 
         if hotspots is not None:
@@ -941,9 +959,7 @@ class Target:
             self.contig_crop(conf.contig_crop)
 
     def parse_contig(self, contig_crop):
-        """
-        Takes contig input and parses
-        """
+        """Takes contig input and parses."""
         contig_list = []
         for contig in contig_crop[0].split(" "):
             subcon = []
@@ -961,14 +977,13 @@ class Target:
         return contig_list
 
     def contig_crop(self, contig_crop, residue_offset=200) -> None:
-        """
-        Method to take a contig string referring to the receptor and output a pdb dictionary with just this crop
+        """Method to take a contig string referring to the receptor and output a pdb dictionary with just this crop.
+
         NB there are two ways to provide inputs:
             - 1) e.g. B1-30,0 B50-60,0. This will add a residue offset between each chunk
             - 2) e.g. B1-30,B50-60,B80-100. This will keep the original indexing of the pdb file.
         Can handle the target being on multiple chains
         """
-
         # add residue offset between chains if multiple chains in receptor file
         for idx, val in enumerate(self.pdb["pdb_idx"]):
             if idx != 0 and val != self.pdb["pdb_idx"][idx - 1]:
@@ -988,28 +1003,30 @@ class Target:
         )
 
         # sanity check
-        assert np.sum(self.pdb["hotspots"]) == np.sum(
-            self.pdb["hotspots"][mask]
-        ), "Supplied hotspot residues are missing from the target contig!"
+        if np.sum(self.pdb["hotspots"]) != np.sum(self.pdb["hotspots"][mask]):
+            raise ValueError(
+                "Supplied hotspot residues are missing from the target contig!"
+            )
         # crop pdb
         for key, val in self.pdb.items():
             try:
                 self.pdb[key] = val[mask]
-            except:
+            except:  # noqa: E722
                 self.pdb[key] = [i for idx, i in enumerate(val) if mask[idx]]
         self.pdb["crop_mask"] = mask
 
-    def get_target(self):
+    def get_target(self):  # noqa: D102
         return self.pdb
 
+
 def ss_from_contig(ss_masks: dict):
-    """  
-    Function for taking 1D masks for each of the ss types, and outputting a secondary structure input
-    """
-    L=len(ss_masks['helix'])
-    ss=torch.zeros((L, 4)).long()
-    ss[:,3] = 1 #mask
-    for idx, mask in enumerate([ss_masks['helix'],ss_masks['strand'], ss_masks['loop']]):
-        ss[mask,idx] = 1
-        ss[mask, 3] = 0 # remove the mask token
+    """Function for taking 1D masks for each of the ss types, and outputting a secondary structure input."""
+    L = len(ss_masks["helix"])
+    ss = torch.zeros((L, 4)).long()
+    ss[:, 3] = 1  # mask
+    for idx, mask in enumerate(
+        [ss_masks["helix"], ss_masks["strand"], ss_masks["loop"]]
+    ):
+        ss[mask, idx] = 1
+        ss[mask, 3] = 0  # remove the mask token
     return ss
