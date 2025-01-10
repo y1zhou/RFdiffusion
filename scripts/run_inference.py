@@ -194,7 +194,7 @@ def main(conf: BaseConfig) -> None:  # noqa: D103
                 chain_ids=sampler.chain_idx,
             )
 
-        log.info(f"Finished design in {(time.time()-start_time)/60:.2f} minutes")
+        log.info(f"Finished design in {(time.time() - start_time) / 60:.2f} minutes")
 
 
 if __name__ == "__main__":
