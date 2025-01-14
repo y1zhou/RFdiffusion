@@ -531,6 +531,8 @@ def sampler_selector(conf: BaseConfig):
             sampler = model_runners.SelfConditioning(conf)
         elif conf.inference.model_runner == "ScaffoldedSampler":
             sampler = model_runners.ScaffoldedSampler(conf)
+        elif conf.inference.model_runner == "MultiStateSampler":
+            sampler = model_runners.MultiStateSampler(conf)
         else:
             raise ValueError(f"Unrecognized sampler {conf.inference.model_runner}")
     return sampler
@@ -801,9 +803,9 @@ class BlockAdjacency:
 
     def get_ss_adj(self, item):
         """Given at item, get the ss tensor and block adjacency matrix for that item."""
-        ss = torch.load(os.path.join(self.scaffold_dir, f'{item.split(".")[0]}_ss.pt'))
+        ss = torch.load(os.path.join(self.scaffold_dir, f"{item.split('.')[0]}_ss.pt"))
         adj = torch.load(
-            os.path.join(self.scaffold_dir, f'{item.split(".")[0]}_adj.pt')
+            os.path.join(self.scaffold_dir, f"{item.split('.')[0]}_adj.pt")
         )
 
         return ss, adj

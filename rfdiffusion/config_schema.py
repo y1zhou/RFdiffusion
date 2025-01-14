@@ -186,6 +186,22 @@ class ScaffoldGuidedConfig:  # noqa: D101
 
 
 @dataclass
+class MultiStateConfig:
+    """Configs for multi-state design.
+
+    Attributes:
+        pdb_path: path to the second PDB file.
+        contigmap: ContigMapConfig for the second PDB file. Should be identical for the
+            parts to be generated.
+        ppi: hotspot residues for the second PDB file.
+    """
+
+    pdb_path: Optional[str] = None
+    contigmap: ContigMapConfig = field(default_factory=ContigMapConfig)
+    ppi: PpiConfig = field(default_factory=PpiConfig)
+
+
+@dataclass
 class BaseConfig(DictConfig):  # noqa: D101
     inference: InferenceConfig = field(default_factory=InferenceConfig)
     contigmap: ContigMapConfig = field(default_factory=ContigMapConfig)
@@ -198,3 +214,4 @@ class BaseConfig(DictConfig):  # noqa: D101
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     scaffoldguided: ScaffoldGuidedConfig = field(default_factory=ScaffoldGuidedConfig)
+    multistate: MultiStateConfig = field(default_factory=MultiStateConfig)

@@ -1114,3 +1114,140 @@ class ScaffoldedSampler(SelfConditioning):
             idx_pdb[:, self.binderlen :] += 200
 
         return msa_masked, msa_full, seq, xyz_prev, idx_pdb, t1d, t2d, xyz_t, alpha_t
+
+
+class MultiStateSampler(SelfConditioning):
+    """Model Runner for Multi-State diffusion."""
+
+    def sample_init(self, return_forward_trajectory=False):
+        """Initial features to start the sampling process.
+
+        The main difference from `Sampler.sample_init` is that we need the
+        model to be aware of both states to be conditioned on.
+
+        Returns:
+            xt: Starting positions with a portion of them randomly sampled.
+            seq_t: Starting sequence with a portion of them set to unknown.
+        """
+        # Initialize features for the regular input
+        xt_regular, seq_t_regular = super().sample_init(return_forward_trajectory)
+
+        # Initialize features for the second state
+        # Note that the certain modules can be shared between the two states
+
+        #######################
+        ### Parse input pdb ###
+        #######################
+        self.target_feats2 = iu.process_target(
+            self._conf.multistate.pdb_path, parse_hetatom=True, center=False
+        )
+        # TODO: SVDSuperimposer or similar to align the two binder chains
+
+        ################################
+        ### Generate specific contig ###
+        ################################
+
+        # Generate a specific contig from the range of possibilities specified at input
+        self._log.info(f"Using contig: {self._conf.multistate.contigmap.contigs}")
+        self.contig_map2 = ContigMap(
+            self.target_feats2, **self._conf.multistate.contigmap
+        )
+        self.mappings2 = self.contig_map2.get_mappings()
+        self.mask_seq2 = torch.from_numpy(self.contig_map2.inpaint_seq)[None, :]
+        self.mask_str2 = torch.from_numpy(self.contig_map2.inpaint_str)[None, :]
+        if len(self.contig_map2.inpaint) != self.binderlen:
+            raise ValueError(
+                f"the length of the binder must match in the two contigs, {len(self.contig_map2.inpaint)} != {self.binderlen}"
+            )
+
+        ####################
+        ### Get Hotspots ###
+        ####################
+
+        self.hotspot_0idx2 = iu.get_idx0_hotspots(
+            self.mappings2, self._conf.multistate.ppi, self.binderlen
+        )
+
+        ###################################
+        ### Initialize other attributes ###
+        ###################################
+
+        xyz_27 = self.target_feats2["xyz_27"]
+        mask_27 = self.target_feats2["mask_27"]
+        seq_orig = self.target_feats2["seq"]
+        L_mapped = len(self.contig_map2.ref)
+        contig_map = self.contig_map2
+
+        self.diffusion_mask2 = self.mask_str2
+        self.chain_idx2 = ["A" if i < self.binderlen else "B" for i in range(L_mapped)]
+
+        ####################################
+        ### Generate initial coordinates ###
+        ####################################
+        if self.diffuser_conf.partial_T:
+            if xyz_27.shape[0] != L_mapped:
+                raise ValueError(
+                    f"there must be a coordinate in the input PDB for \
+                    each residue implied by the contig string for partial diffusion. length of \
+                    input PDB != length of contig string: {xyz_27.shape[0]} != {L_mapped}"
+                )
+            if contig_map.hal_idx0 != contig_map.ref_idx0:
+                raise ValueError(
+                    f"for partial diffusion there can \
+                    be no offset between the index of a residue in the input and the index of the \
+                    residue in the output, {contig_map.hal_idx0} != {contig_map.ref_idx0}"
+                )
+            # Partially diffusing from a known structure
+            xyz_mapped = xyz_27
+            atom_mask_mapped = mask_27
+        else:
+            # Fully diffusing from points initialised at the origin
+            # adjust size of input xt according to residue map
+            xyz_mapped = torch.full((1, 1, L_mapped, 27, 3), np.nan)
+            xyz_mapped[:, :, contig_map.hal_idx0, ...] = xyz_27[
+                contig_map.ref_idx0, ...
+            ]
+            # xyz_motif_prealign = xyz_mapped.clone()
+            # motif_prealign_com = xyz_motif_prealign[0, 0, :, 1].mean(dim=0)
+            self.motif_com2 = xyz_27[contig_map.ref_idx0, 1].mean(dim=0)
+            xyz_mapped = get_init_xyz(xyz_mapped).squeeze()
+            # adjust the size of the input atom map
+            atom_mask_mapped = torch.full((L_mapped, 27), False)
+            atom_mask_mapped[contig_map.hal_idx0] = mask_27[contig_map.ref_idx0]
+
+        # Diffuse the contig-mapped coordinates
+        t_list = np.arange(1, self.t_step_input + 1)
+
+        #################################
+        ### Generate initial sequence ###
+        #################################
+
+        seq_t = torch.full((1, L_mapped), 21).squeeze()  # 21 is the mask token
+        seq_t[contig_map.hal_idx0] = seq_orig[contig_map.ref_idx0]
+
+        # Unmask sequence if desired
+        if self._conf.multistate.contigmap.provide_seq is not None:
+            seq_t[self.mask_seq2.squeeze()] = seq_orig[self.mask_seq2.squeeze()]
+
+        seq_t[~self.mask_seq2.squeeze()] = 21
+        seq_t = torch.nn.functional.one_hot(seq_t, num_classes=22).float()  # [L,22]
+        seq_orig = torch.nn.functional.one_hot(
+            seq_orig, num_classes=22
+        ).float()  # [L,22]
+
+        fa_stack, xyz_true = self.diffuser.diffuse_pose(
+            xyz_mapped,
+            torch.clone(seq_t),
+            atom_mask_mapped.squeeze(),
+            diffusion_mask=self.diffusion_mask2.squeeze(),
+            t_list=t_list,
+        )
+        xT = fa_stack[-1].squeeze()[:, :14, :]
+        xt = torch.clone(xT)
+
+        self.denoiser2 = self.construct_denoiser(
+            len(self.contig_map2.ref), visible=self.mask_seq2.squeeze()
+        )
+        self._log.info(f"Sequence2 init: {seq2chars(torch.argmax(seq_t, dim=-1))}")
+
+        return (xt_regular, xt), (seq_t_regular, seq_t)

@@ -94,6 +94,11 @@ def main(conf: BaseConfig) -> None:  # noqa: D103
         seq_stack = []
         plddt_stack = []
 
+        if sampler.inf_conf.model_runner == "MultiStateSampler":
+            x_init, x_init2 = x_init
+            seq_init, seq_init2 = seq_init
+            x_t2 = torch.clone(x_init2)
+            seq_t2 = torch.clone(seq_init2)
         x_t = torch.clone(x_init)
         seq_t = torch.clone(seq_init)
         # Loop over number of reverse diffusion time steps.
