@@ -15,8 +15,10 @@ from rfdiffusion.util import rigid_from_3_points
 torch.set_printoptions(sci_mode=False)
 
 
-def get_beta_schedule(T, b0, bT, schedule_type, schedule_params={}, inference=False):
+def get_beta_schedule(T, b0, bT, schedule_type, schedule_params=None, inference=False):
     """Given a noise schedule type, create the beta schedule."""
+    if schedule_params is None:
+        schedule_params = {}
     assert schedule_type in ["linear"]
 
     # Adjust b0 and bT if T is not 200
@@ -53,9 +55,11 @@ class EuclideanDiffuser:
         b_0,
         b_T,
         schedule_type="linear",
-        schedule_kwargs={},
+        schedule_kwargs=None,
     ):
         """Setup the diffuser."""
+        if schedule_kwargs is None:
+            schedule_kwargs = {}
         self.T = T
 
         # make noise/beta schedule
@@ -265,7 +269,7 @@ class IGSO3:
         continuous_t = t / self.T
         return self.sigma_idx(self.sigma(continuous_t))
 
-    def sigma(self, t: torch.tensor):
+    def sigma(self, t):
         r"""Extract \sigma(t) corresponding to chosen sigma schedule.
 
         Args:
@@ -378,7 +382,7 @@ class IGSO3:
         all_score_norm = []
         for i, t in enumerate(ts):
             omega_t = omega[i]
-            t_idx = t - 1
+            # t_idx = t - 1
             sigma_idx = self.t_to_idx(t)
             score_norm_t = np.interp(
                 omega_t,
@@ -563,7 +567,7 @@ class Diffuser:
         so3_schedule_type,
         so3_type,
         crd_scale,
-        schedule_kwargs={},
+        schedule_kwargs=None,
         var_scale=1.0,
         cache_dir=".",
         partial_T=None,
@@ -578,6 +582,8 @@ class Diffuser:
         b_T (float, required): Ending variance for Euclidean schedule
 
         """
+        if schedule_kwargs is None:
+            schedule_kwargs = {}
         self.T = T
         self.b_0 = b_0
         self.b_T = b_T
