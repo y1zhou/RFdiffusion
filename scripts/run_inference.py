@@ -40,6 +40,94 @@ def make_deterministic(seed=0):  # noqa: D103
     random.seed(seed)
 
 
+def save_sampled_results(
+    denoised_xyz_stack: list[torch.Tensor],
+    px0_xyz_stack: list[torch.Tensor],
+    seq_stack: list[torch.Tensor],  # TODO: save all seqs instead of just the final one
+    plddt_stack: list[torch.Tensor],
+    seq_init: torch.Tensor,
+    binder_len: int,
+    chain_ids: list[str],
+    out_prefix: str,
+    out_suffix: str = "",
+    write_trajectory: bool = True,
+) -> torch.Tensor:
+    """Save sampled results to pdb files.
+
+    Args:
+        denoised_xyz_stack: List of denoised coordinates (what went into the model at each timestep).
+        px0_xyz_stack: List of pX0 coordinates (what the model predicted at each timestep).
+        seq_stack: List of sequences.
+        plddt_stack: List of pLDDT values.
+        seq_init: Initial sequence.
+        binder_len: Length of the binder.
+        chain_ids: Chain IDs.
+        out_prefix: Output prefix.
+        out_suffix: Output suffix.
+        write_trajectory: Whether to output full trajectories.
+    """
+    # Flip order for better visualization in pymol
+    denoised_xyz = torch.stack(denoised_xyz_stack)
+    denoised_xyz = torch.flip(denoised_xyz, [0])
+    px0_xyz = torch.stack(px0_xyz_stack)
+    px0_xyz = torch.flip(px0_xyz, [0])
+
+    # For logging -- don't flip
+    plddt = torch.stack(plddt_stack)
+
+    # Save outputs
+    os.makedirs(os.path.dirname(out_prefix), exist_ok=True)
+    final_seq = seq_stack[-1]
+
+    # Output glycines, except for motif region
+    final_seq = torch.where(
+        torch.argmax(seq_init, dim=-1) == 21, 7, torch.argmax(seq_init, dim=-1)
+    )  # 7 is glycine
+
+    bfacts = torch.ones_like(final_seq.squeeze())
+    # make bfact=0 for diffused coordinates
+    bfacts[torch.where(torch.argmax(seq_init, dim=-1) == 21, True, False)] = 0
+
+    # pX0 last step
+    # Now don't output sidechains
+    writepdb(
+        f"{out_prefix}{out_suffix}.pdb",
+        denoised_xyz[0, :, :4],
+        final_seq,
+        binder_len,
+        chain_idx=chain_ids,
+        bfacts=bfacts,
+    )
+
+    if write_trajectory:
+        # trajectory pdbs
+        traj_prefix = (
+            os.path.dirname(out_prefix) + "/traj/" + os.path.basename(out_prefix)
+        )
+        os.makedirs(os.path.dirname(traj_prefix), exist_ok=True)
+
+        writepdb_multi(
+            f"{traj_prefix}{out_suffix}_Xt-1_traj.pdb",
+            denoised_xyz,
+            bfacts,
+            final_seq.squeeze(),
+            use_hydrogens=False,
+            backbone_only=False,
+            chain_ids=chain_ids,
+        )
+        writepdb_multi(
+            f"{traj_prefix}{out_suffix}_pX0_traj.pdb",
+            px0_xyz,
+            bfacts,
+            final_seq.squeeze(),
+            use_hydrogens=False,
+            backbone_only=False,
+            chain_ids=chain_ids,
+        )
+
+    return plddt
+
+
 @hydra.main(version_base=None, config_path="../config/inference", config_name="base")
 def main(conf: BaseConfig) -> None:  # noqa: D103
     log = logging.getLogger(__name__)
@@ -95,6 +183,10 @@ def main(conf: BaseConfig) -> None:  # noqa: D103
         px0_xyz_stack = []
         seq_stack = []
         plddt_stack = []
+        denoised_xyz_stack2 = []
+        px0_xyz_stack2 = []
+        seq_stack2 = []
+        plddt_stack2 = []
 
         if sampler.inf_conf.model_runner == "DuoStateSampler":
             x_init, x_init2 = x_init
@@ -108,8 +200,8 @@ def main(conf: BaseConfig) -> None:  # noqa: D103
             if sampler.inf_conf.model_runner == "DuoStateSampler":
                 (
                     px0_s1,
-                    x_t_1_s1,
-                    seq_t_1_s1,
+                    x_t,
+                    seq_t,
                     plddt_s1,
                     px0_s2,
                     x_t_1_s2,
@@ -123,103 +215,87 @@ def main(conf: BaseConfig) -> None:  # noqa: D103
                     x_t2=x_t2,
                     seq_init2=seq_t2,
                 )
+                px0_xyz_stack.append(px0_s1)
+                denoised_xyz_stack.append(x_t)
+                seq_stack.append(seq_t)
+                plddt_stack.append(plddt_s1[0])  # remove singleton leading dimension
+                px0_xyz_stack2.append(px0_s2)
+                denoised_xyz_stack2.append(x_t_1_s2)
+                seq_stack2.append(seq_t_1_s2)
+                plddt_stack2.append(plddt_s2[0])
             else:
                 px0, x_t, seq_t, plddt = sampler.sample_step(
                     t=t, x_t=x_t, seq_init=seq_t, final_step=sampler.inf_conf.final_step
                 )
-            px0_xyz_stack.append(px0)
-            denoised_xyz_stack.append(x_t)
-            seq_stack.append(seq_t)
-            plddt_stack.append(plddt[0])  # remove singleton leading dimension
+                px0_xyz_stack.append(px0)
+                denoised_xyz_stack.append(x_t)
+                seq_stack.append(seq_t)
+                plddt_stack.append(plddt[0])  # remove singleton leading dimension
 
-        # TODO: save results for DuoStateSampler
-        # Flip order for better visualization in pymol
-        denoised_xyz_stack = torch.stack(denoised_xyz_stack)
-        denoised_xyz_stack = torch.flip(
-            denoised_xyz_stack,
-            [
-                0,
-            ],
-        )
-        px0_xyz_stack = torch.stack(px0_xyz_stack)
-        px0_xyz_stack = torch.flip(
-            px0_xyz_stack,
-            [
-                0,
-            ],
-        )
-
-        # For logging -- don't flip
-        plddt_stack = torch.stack(plddt_stack)
-
-        # Save outputs
-        os.makedirs(os.path.dirname(out_prefix), exist_ok=True)
-        final_seq = seq_stack[-1]
-
-        # Output glycines, except for motif region
-        final_seq = torch.where(
-            torch.argmax(seq_init, dim=-1) == 21, 7, torch.argmax(seq_init, dim=-1)
-        )  # 7 is glycine
-
-        bfacts = torch.ones_like(final_seq.squeeze())
-        # make bfact=0 for diffused coordinates
-        bfacts[torch.where(torch.argmax(seq_init, dim=-1) == 21, True, False)] = 0
-        # pX0 last step
-        out = f"{out_prefix}.pdb"
-
-        # Now don't output sidechains
-        writepdb(
-            out,
-            denoised_xyz_stack[0, :, :4],
-            final_seq,
-            sampler.binderlen,
-            chain_idx=sampler.chain_idx,
-            bfacts=bfacts,
-        )
+        if sampler.inf_conf.model_runner == "DuoStateSampler":
+            plddt_s1 = save_sampled_results(
+                denoised_xyz_stack,
+                px0_xyz_stack,
+                seq_stack,
+                plddt_stack,
+                seq_init,
+                sampler.binderlen,
+                sampler.chain_idx,
+                out_prefix,
+                out_suffix="_s1",
+                write_trajectory=sampler.inf_conf.write_trajectory,
+            )
+            plddt_s2 = save_sampled_results(
+                denoised_xyz_stack2,
+                px0_xyz_stack2,
+                seq_stack2,
+                plddt_stack2,
+                seq_init2,
+                sampler.binderlen,
+                sampler.chain_idx2,
+                out_prefix,
+                out_suffix="_s2",
+                write_trajectory=sampler.inf_conf.write_trajectory,
+            )
+            trb = dict(
+                config=OmegaConf.to_container(sampler._conf, resolve=True),
+                plddt=plddt_s1.detach().cpu().numpy(),
+                duostate_plddt=plddt_s2.detach().cpu().numpy(),
+                device=torch.cuda.get_device_name(device)
+                if torch.cuda.is_available()
+                else "CPU",
+                time=time.time() - start_time,
+            )
+        else:
+            plddt = save_sampled_results(
+                denoised_xyz_stack,
+                px0_xyz_stack,
+                seq_stack,
+                plddt_stack,
+                seq_init,
+                sampler.binderlen,
+                sampler.chain_idx,
+                out_prefix,
+                write_trajectory=sampler.inf_conf.write_trajectory,
+            )
+            trb = dict(
+                config=OmegaConf.to_container(sampler._conf, resolve=True),
+                plddt=plddt.detach().cpu().numpy(),
+                device=torch.cuda.get_device_name(device)
+                if torch.cuda.is_available()
+                else "CPU",
+                time=time.time() - start_time,
+            )
 
         # run metadata
-        trb = dict(
-            config=OmegaConf.to_container(sampler._conf, resolve=True),
-            plddt=plddt_stack.cpu().numpy(),
-            device=torch.cuda.get_device_name(torch.cuda.current_device())
-            if torch.cuda.is_available()
-            else "CPU",
-            time=time.time() - start_time,
-        )
         if hasattr(sampler, "contig_map"):
             for key, value in sampler.contig_map.get_mappings().items():
                 trb[key] = value
+        if hasattr(sampler, "contig_map2"):
+            for key, value in sampler.contig_map2.get_mappings().items():
+                trb[f"duostate_{key}"] = value
         with open(f"{out_prefix}.trb", "wb") as f_out:
             pickle.dump(trb, f_out)
-
-        if sampler.inf_conf.write_trajectory:
-            # trajectory pdbs
-            traj_prefix = (
-                os.path.dirname(out_prefix) + "/traj/" + os.path.basename(out_prefix)
-            )
-            os.makedirs(os.path.dirname(traj_prefix), exist_ok=True)
-
-            out = f"{traj_prefix}_Xt-1_traj.pdb"
-            writepdb_multi(
-                out,
-                denoised_xyz_stack,
-                bfacts,
-                final_seq.squeeze(),
-                use_hydrogens=False,
-                backbone_only=False,
-                chain_ids=sampler.chain_idx,
-            )
-
-            out = f"{traj_prefix}_pX0_traj.pdb"
-            writepdb_multi(
-                out,
-                px0_xyz_stack,
-                bfacts,
-                final_seq.squeeze(),
-                use_hydrogens=False,
-                backbone_only=False,
-                chain_ids=sampler.chain_idx,
-            )
 
         log.info(f"Finished design in {(time.time() - start_time) / 60:.2f} minutes")
 

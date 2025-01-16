@@ -1167,7 +1167,6 @@ class DuoStateSampler(SelfConditioning):
         self.target_feats2 = iu.process_target(
             self._conf.duostate.pdb_path, parse_hetatom=True, center=False
         )
-        # TODO: SVDSuperimposer or similar to align the two binder chains
 
         ################################
         ### Generate specific contig ###
@@ -1452,7 +1451,7 @@ class DuoStateSampler(SelfConditioning):
             denoiser=self.denoiser2,
         )
 
-        # TODO: Align the two states based on the CA atoms in the binder chain
+        # Align the two states based on the CA atoms in the binder chain
         # No need to do this for px0 because it happens in denoiser.get_next_pose
         x_t_1_s1_binder = x_t_1_s1[: self.binderlen, 1, :]
         x_t_1_s2_binder = x_t_1_s2[: self.binderlen, 1, :]
