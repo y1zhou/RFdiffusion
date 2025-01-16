@@ -1,15 +1,56 @@
+"""Utility functions for the rfdiffusion package."""
+
+import numpy as np
 import scipy.sparse
-from rfdiffusion.chemical import *
-from rfdiffusion.scoring import *
+import torch
+
+from rfdiffusion.chemical import (
+    aa2long,
+    aa2longalt,
+    aa2num,
+    aa2tip,
+    aa2type,
+    aabonds,
+    cos_ideal_NCAC,
+    ideal_coords,
+    num2aa,
+    torsions,
+)
+from rfdiffusion.scoring import (
+    HbAccType,
+    HbAtom,
+    HbDonType,
+    HbHybType,
+    acctype2wt,
+    dontype2wt,
+    hbpolytype2coeffs,
+    hbtypepair2poly,
+    type2acctype,
+    type2dontype,
+    type2hb,
+    type2hybtype,
+    type2ljlk,
+)
 
 
 def generate_Cbeta(N, Ca, C):
-    # recreate Cb given N,Ca,C
+    """Recreate Cb given N, Ca, C coordinates.
+
+    This function uses training parameters to compute the Cbeta position.
+
+    Args:
+        N (torch.Tensor): N atom coordinates.
+        Ca (torch.Tensor): CA atom coordinates.
+        C (torch.Tensor): C atom coordinates.
+
+    Returns:
+        torch.Tensor: Coordinates of the reconstructed Cbeta.
+    """
     b = Ca - N
     c = C - Ca
     a = torch.cross(b, c, dim=-1)
     # These are the values used during training
-    Cb = -0.58273431*a + 0.56802827*b - 0.54067466*c + Ca
+    Cb = -0.58273431 * a + 0.56802827 * b - 0.54067466 * c + Ca
     # fd: below matches sidechain generator (=Rosetta params)
     # Cb = -0.57910144 * a + 0.5689693 * b - 0.5441217 * c + Ca
 
@@ -17,6 +58,17 @@ def generate_Cbeta(N, Ca, C):
 
 
 def th_ang_v(ab, bc, eps: float = 1e-8):
+    """Compute sine and cosine of the angle formed by vectors ab and bc.
+
+    Args:
+        ab (torch.Tensor): Vector from point A to B.
+        bc (torch.Tensor): Vector from point B to C.
+        eps (float, optional): Small float to avoid division by zero.
+
+    Returns:
+        torch.Tensor: A two-element tensor of (cos(angle), sin(angle)).
+    """
+
     def th_norm(x, eps: float = 1e-8):
         return x.square().sum(-1, keepdim=True).add(eps).sqrt()
 
@@ -31,6 +83,17 @@ def th_ang_v(ab, bc, eps: float = 1e-8):
 
 
 def th_dih_v(ab, bc, cd):
+    """Compute sine and cosine of the dihedral defined by vectors ab, bc, cd.
+
+    Args:
+        ab (torch.Tensor): Vector from point A to B.
+        bc (torch.Tensor): Vector from point B to C.
+        cd (torch.Tensor): Vector from point C to D.
+
+    Returns:
+        torch.Tensor: A two-element tensor of (cos(dihedral), sin(dihedral)).
+    """
+
     def th_cross(a, b):
         a, b = torch.broadcast_tensors(a, b)
         return torch.cross(a, b, dim=-1)
@@ -51,14 +114,38 @@ def th_dih_v(ab, bc, cd):
 
 
 def th_dih(a, b, c, d):
+    """Wrapper for th_dih_v using actual coordinates a, b, c, d.
+
+    Args:
+        a (torch.Tensor): First coordinate point.
+        b (torch.Tensor): Second coordinate point.
+        c (torch.Tensor): Third coordinate point.
+        d (torch.Tensor): Fourth coordinate point.
+
+    Returns:
+        torch.Tensor: A two-element tensor (cosine, sine) of the dihedral angle.
+    """
     return th_dih_v(a - b, b - c, c - d)
 
 
 # More complicated version splits error in CA-N and CA-C (giving more accurate CB position)
 # It returns the rigid transformation from local frame to global frame
 def rigid_from_3_points(N, Ca, C, non_ideal=False, eps=1e-8):
-    # N, Ca, C - [B,L, 3]
-    # R - [B,L, 3, 3], det(R)=1, inv(R) = R.T, R is a rotation matrix
+    """Compute a rigid transformation from local frame (N, Ca, C) to global frame.
+
+    N, Ca, C are [B, L, 3] coordinate tensors. This returns a rotation matrix R
+    such that inv(R) = R.T and det(R) = 1, plus a translation vector.
+
+    Args:
+        N (torch.Tensor): Coordinates of N atoms.
+        Ca (torch.Tensor): Coordinates of CA atoms.
+        C (torch.Tensor): Coordinates of C atoms.
+        non_ideal (bool, optional): Whether or not to apply non-ideal corrections.
+        eps (float, optional): Small float for numeric stability.
+
+    Returns:
+        tuple: (R, center) where R is the rotation matrix, center is Ca coordinates.
+    """
     B, L = N.shape[:2]
 
     v1 = C - Ca
@@ -68,7 +155,7 @@ def rigid_from_3_points(N, Ca, C, non_ideal=False, eps=1e-8):
     e2 = u2 / (torch.norm(u2, dim=-1, keepdim=True) + eps)
     e3 = torch.cross(e1, e2, dim=-1)
     R = torch.cat(
-        [e1[..., None], e2[..., None], e3[..., None]], axis=-1
+        [e1[..., None], e2[..., None], e3[..., None]], dim=-1
     )  # [B,L,3,3] - rotation matrix
 
     if non_ideal:
@@ -95,6 +182,16 @@ def rigid_from_3_points(N, Ca, C, non_ideal=False, eps=1e-8):
 
 
 def get_tor_mask(seq, torsion_indices, mask_in=None):
+    """Compute a mask for valid backbone and sidechain torsion angles.
+
+    Args:
+        seq (torch.Tensor): Amino acid sequence tensor.
+        torsion_indices (torch.Tensor): Indices for the torsion-defining atoms.
+        mask_in (torch.Tensor, optional): Mask for missing atoms.
+
+    Returns:
+        torch.Tensor: Boolean tensor indicating which torsion angles are valid.
+    """
     B, L = seq.shape[:2]
     tors_mask = torch.ones((B, L, 10), dtype=torch.bool, device=seq.device)
     tors_mask[..., 3:7] = torsion_indices[seq, :, -1] > 0
@@ -108,7 +205,7 @@ def get_tor_mask(seq, torsion_indices, mask_in=None):
     tors_mask[:, :, 9] = torch.logical_and(tors_mask[:, :, 9], seq != aa2num["UNK"])
     tors_mask[:, :, 9] = torch.logical_and(tors_mask[:, :, 9], seq != aa2num["MAS"])
 
-    if mask_in != None:
+    if mask_in is not None:
         # mask for missing atoms
         # chis
         ti0 = torch.gather(mask_in, 2, torsion_indices[seq, :, 0])
@@ -133,6 +230,19 @@ def get_tor_mask(seq, torsion_indices, mask_in=None):
 def get_torsions(
     xyz_in, seq, torsion_indices, torsion_can_flip, ref_angles, mask_in=None
 ):
+    """Compute torsion angles (omega, phi, psi, chis, and extra angles).
+
+    Args:
+        xyz_in (torch.Tensor): Input coordinates [B, L, nAtoms, 3].
+        seq (torch.Tensor): Amino acid sequence tensor.
+        torsion_indices (torch.Tensor): Indices for torsion atoms.
+        torsion_can_flip (torch.Tensor): Which torsions can have flipped sign.
+        ref_angles (torch.Tensor): Reference angles for sidechain bending.
+        mask_in (torch.Tensor, optional): Mask for missing atoms.
+
+    Returns:
+        tuple: (torsions, torsions_alt, tors_mask, tors_planar).
+    """
     B, L = xyz_in.shape[:2]
 
     tors_mask = get_tor_mask(seq, torsion_indices, mask_in)
@@ -223,6 +333,15 @@ def get_torsions(
 
 
 def get_tips(xyz, seq):
+    """Gather tip atoms, substituting virtual Cb if original tip is missing.
+
+    Args:
+        xyz (torch.Tensor): Atom coordinates [B, L, nAtoms, 3].
+        seq (torch.Tensor): Amino acid sequence tensor.
+
+    Returns:
+        tuple: (xyz_tips, mask) where xyz_tips are tip positions, mask is valid entries.
+    """
     B, L = xyz.shape[:2]
 
     xyz_tips = torch.gather(
@@ -247,6 +366,15 @@ def get_tips(xyz, seq):
 
 # process ideal frames
 def make_frame(X, Y):
+    """Construct an orthonormal frame from vectors X, Y.
+
+    Args:
+        X (torch.Tensor): First vector.
+        Y (torch.Tensor): Second vector.
+
+    Returns:
+        torch.Tensor: 3x3 matrix representing an orthonormal basis.
+    """
     Xn = X / torch.linalg.norm(X)
     Y = Y - torch.dot(Y, Xn) * Xn
     Yn = Y / torch.linalg.norm(Y)
@@ -257,6 +385,14 @@ def make_frame(X, Y):
 
 
 def cross_product_matrix(u):
+    """Create cross-product operator matrix for u.
+
+    Args:
+        u (torch.Tensor): [B, L, 3] set of vectors.
+
+    Returns:
+        torch.Tensor: [B, L, 3, 3] cross-product matrix for each vector in u.
+    """
     B, L = u.shape[:2]
     matrix = torch.zeros((B, L, 3, 3), device=u.device)
     matrix[:, :, 0, 1] = -u[..., 2]
@@ -272,6 +408,19 @@ def cross_product_matrix(u):
 def writepdb(
     filename, atoms, seq, binderlen=None, idx_pdb=None, bfacts=None, chain_idx=None
 ):
+    """Write a PDB file from coordinates.
+
+    If binderlen is provided, residues are split into chain A (binder) and chain B (target).
+
+    Args:
+        filename (str): Output file path.
+        atoms (torch.Tensor): Atom coordinates [L, nAtoms, 3].
+        seq (torch.Tensor): Amino acid sequence.
+        binderlen (int, optional): Length of binder part.
+        idx_pdb (torch.Tensor, optional): Residue indices.
+        bfacts (torch.Tensor, optional): B-factors for each residue.
+        chain_idx (list, optional): Chain IDs per residue.
+    """
     f = open(filename, "w")
     ctr = 1
     scpu = seq.cpu().squeeze()
@@ -295,7 +444,7 @@ def writepdb(
             chain = chain_idx[i]
         if len(atomscpu.shape) == 2:
             f.write(
-                "%-6s%5s %4s %3s %s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f\n"
+                "%-6s%5s %4s %3s %s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f\n"  # noqa: UP031
                 % (
                     "ATOM",
                     ctr,
@@ -314,7 +463,7 @@ def writepdb(
         elif atomscpu.shape[1] == 3:
             for j, atm_j in enumerate([" N  ", " CA ", " C  "]):
                 f.write(
-                    "%-6s%5s %4s %3s %s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f\n"
+                    "%-6s%5s %4s %3s %s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f\n"  # noqa: UP031
                     % (
                         "ATOM",
                         ctr,
@@ -333,7 +482,7 @@ def writepdb(
         elif atomscpu.shape[1] == 4:
             for j, atm_j in enumerate([" N  ", " CA ", " C  ", " O  "]):
                 f.write(
-                    "%-6s%5s %4s %3s %s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f\n"
+                    "%-6s%5s %4s %3s %s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f\n"  # noqa: UP031
                     % (
                         "ATOM",
                         ctr,
@@ -353,8 +502,7 @@ def writepdb(
         else:
             natoms = atomscpu.shape[1]
             if natoms != 14 and natoms != 27:
-                print("bad size!", atoms.shape)
-                assert False
+                raise ValueError("bad size!", atoms.shape)
             atms = aa2long[s]
             # his prot hack
             if (
@@ -396,7 +544,7 @@ def writepdb(
                     j < natoms and atm_j is not None
                 ):  # and not torch.isnan(atomscpu[i,j,:]).any()):
                     f.write(
-                        "%-6s%5s %4s %3s %s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f\n"
+                        "%-6s%5s %4s %3s %s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f\n"  # noqa: UP031
                         % (
                             "ATOM",
                             ctr,
@@ -464,7 +612,7 @@ for i in range(22):
 # LJ/LK scoring parameters
 ljlk_parameters = torch.zeros((22, 27, 5), dtype=torch.float)
 lj_correction_parameters = torch.zeros(
-    (22, 27, 4), dtype=bool
+    (22, 27, 4), dtype=torch.bool
 )  # donor/acceptor/hpol/disulf
 for i in range(22):
     for j, a in enumerate(aa2type[i]):
@@ -480,8 +628,8 @@ for i in range(22):
             lj_correction_parameters[i, j, 3] = a == "SH1" or a == "HS"
 
 
-# hbond scoring parameters
 def donorHs(D, bonds, atoms):
+    """H-bond scoring parameters."""
     dHs = []
     for i, j in bonds:
         if i == D:
@@ -497,6 +645,17 @@ def donorHs(D, bonds, atoms):
 
 
 def acceptorBB0(A, hyb, bonds, atoms):
+    """Determine the base atoms for an acceptor atom in a hydrogen bond.
+
+    Args:
+        A (int): Index of the acceptor atom.
+        hyb (HbHybType): Hybridization type of the acceptor atom.
+        bonds (list): List of bonds in the molecule.
+        atoms (list): List of atom names in the molecule.
+
+    Returns:
+        tuple: Indices of the base atoms (B, B0).
+    """
     if hyb == HbHybType.SP2:
         for i, j in bonds:
             if i == A:
@@ -667,11 +826,17 @@ def writepdb_multi(
     chain_ids=None,
     use_hydrogens=True,
 ):
-    """
-    Function for writing multiple structural states of the same sequence into a single
-    pdb file.
-    """
+    """Write multiple structural states into a single PDB file.
 
+    Args:
+        filename (str): Output file path.
+        atoms_stack (torch.Tensor): Stack of atom coordinates [T, L, nAtoms, 3].
+        bfacts (torch.Tensor): B-factors for each residue.
+        seq_stack (torch.Tensor): Stack of amino acid sequences [T, L].
+        backbone_only (bool, optional): If True, only writes backbone atoms.
+        chain_ids (list, optional): Chain identifiers for each residue.
+        use_hydrogens (bool, optional): If False, omit hydrogen atoms.
+    """
     f = open(filename, "w")
 
     if seq_stack.ndim != 2:
@@ -695,7 +860,7 @@ def writepdb_multi(
                 if chain_ids is not None:
                     chain_id = chain_ids[i]
                 f.write(
-                    "%-6s%5s %4s %3s %s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f\n"
+                    "%-6s%5s %4s %3s %s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f\n"  # noqa: UP031
                     % (
                         "ATOM",
                         ctr,
@@ -714,9 +879,20 @@ def writepdb_multi(
 
         f.write("ENDMDL\n")
 
+
 def calc_rmsd(xyz1, xyz2, eps=1e-6):
-    """
-    Calculates RMSD between two sets of atoms (L, 3)
+    """Calculate the RMSD between two sets of atom coordinates.
+
+    This uses NumPy-based SVD to find the minimal RMSD after alignment.
+
+    Args:
+        xyz1 (np.ndarray): First set of coordinates [L, 3].
+        xyz2 (np.ndarray): Second set of coordinates [L, 3].
+        eps (float, optional): Small float to avoid division by zero.
+
+    Returns:
+        float: Root-mean-square deviation.
+        np.ndarray: Optimal rotation matrix.
     """
     # center to CA centroid
     xyz1 = xyz1 - xyz1.mean(0)
@@ -729,15 +905,15 @@ def calc_rmsd(xyz1, xyz2, eps=1e-6):
     V, S, W = np.linalg.svd(C)
 
     # get sign to ensure right-handedness
-    d = np.ones([3,3])
-    d[:,-1] = np.sign(np.linalg.det(V)*np.linalg.det(W))
+    d = np.ones([3, 3])
+    d[:, -1] = np.sign(np.linalg.det(V) * np.linalg.det(W))
 
     # Rotation matrix U
-    U = (d*V) @ W
+    U = (d * V) @ W
 
     # Rotate xyz2
     xyz2_ = xyz2 @ U
     L = xyz2_.shape[0]
-    rmsd = np.sqrt(np.sum((xyz2_-xyz1)*(xyz2_-xyz1), axis=(0,1)) / L + eps)
+    rmsd = np.sqrt(np.sum((xyz2_ - xyz1) * (xyz2_ - xyz1), axis=(0, 1)) / L + eps)
 
     return rmsd, U
