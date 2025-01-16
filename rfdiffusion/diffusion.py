@@ -1,26 +1,22 @@
-# script for diffusion protocols
-import torch
-import pickle
-import numpy as np
-import os
-import logging
+"""script for diffusion protocols."""
 
+import logging
+import os
+import pickle
+import time
+
+import numpy as np
+import torch
 from scipy.spatial.transform import Rotation as scipy_R
 
-from rfdiffusion.util import rigid_from_3_points
-
-from rfdiffusion.util_module import ComputeAllAtomCoords
-
 from rfdiffusion import igso3
-import time
+from rfdiffusion.util import rigid_from_3_points
 
 torch.set_printoptions(sci_mode=False)
 
 
 def get_beta_schedule(T, b0, bT, schedule_type, schedule_params={}, inference=False):
-    """
-    Given a noise schedule type, create the beta schedule
-    """
+    """Given a noise schedule type, create the beta schedule."""
     assert schedule_type in ["linear"]
 
     # Adjust b0 and bT if T is not 200
@@ -42,14 +38,14 @@ def get_beta_schedule(T, b0, bT, schedule_type, schedule_params={}, inference=Fa
 
     if inference:
         print(
-            f"With this beta schedule ({schedule_type} schedule, beta_0 = {round(b0, 3)}, beta_T = {round(bT,3)}), alpha_bar_T = {alphabar_t_schedule[-1]}"
+            f"With this beta schedule ({schedule_type} schedule, beta_0 = {round(b0, 3)}, beta_T = {round(bT, 3)}), alpha_bar_T = {alphabar_t_schedule[-1]}"
         )
 
     return schedule, alpha_schedule, alphabar_t_schedule
 
 
 class EuclideanDiffuser:
-    # class for diffusing points in 3D
+    """Class for diffusing points in 3D space."""
 
     def __init__(
         self,
@@ -59,6 +55,7 @@ class EuclideanDiffuser:
         schedule_type="linear",
         schedule_kwargs={},
     ):
+        """Setup the diffuser."""
         self.T = T
 
         # make noise/beta schedule
@@ -69,11 +66,21 @@ class EuclideanDiffuser:
         ) = get_beta_schedule(T, b_0, b_T, schedule_type, **schedule_kwargs)
 
     def diffuse_translations(self, xyz, diffusion_mask=None, var_scale=1):
+        """Diffuse the translations of the given coordinates.
+
+        Parameters:
+            xyz (torch.tensor): (L, 3, 3) set of backbone coordinates.
+            diffusion_mask (torch.tensor, optional): Mask to indicate which residues should not be diffused.
+            var_scale (float, optional): Scale for the variance of the noise.
+
+        Returns:
+            torch.tensor: Diffused coordinates.
+            torch.tensor: Delta values for the diffusion.
+        """
         return self.apply_kernel_recursive(xyz, diffusion_mask, var_scale)
 
     def apply_kernel(self, x, t, diffusion_mask=None, var_scale=1):
-        """
-        Applies a noising kernel to the points in x
+        """Applies a noising kernel to the points in x.
 
         Parameters:
             x (torch.tensor, required): (N,3,3) set of backbone coordinates
@@ -99,7 +106,7 @@ class EuclideanDiffuser:
         sampled_crds = torch.normal(mean, torch.sqrt(var))
         delta = sampled_crds - ca_xyz
 
-        if not diffusion_mask is None:
+        if diffusion_mask is not None:
             delta[diffusion_mask, ...] = 0
 
         out_crds = x + delta[:, None, :]
@@ -107,9 +114,7 @@ class EuclideanDiffuser:
         return out_crds, delta
 
     def apply_kernel_recursive(self, xyz, diffusion_mask=None, var_scale=1):
-        """
-        Repeatedly apply self.apply_kernel T times and return all crds
-        """
+        """Repeatedly apply self.apply_kernel T times and return all crds."""
         bb_stack = []
         T_stack = []
 
@@ -137,7 +142,7 @@ def read_pkl(read_path: str, verbose=False):
     """Read data from a pickle file."""
     with open(read_path, "rb") as handle:
         try:
-            return pickle.load(handle)
+            return pickle.load(handle)  # noqa: S301
         except Exception as e:
             if verbose:
                 print(f"Failed to read {read_path}")
@@ -145,12 +150,9 @@ def read_pkl(read_path: str, verbose=False):
 
 
 class IGSO3:
-    """
-    Class for taking in a set of backbone crds and performing IGSO3 diffusion
-    on all of them.
+    """Class for taking in a set of backbone crds and performing IGSO3 diffusion on all of them.
 
-    Unlike the diffusion on translations, much of this class is written for a
-    scaling between an initial time t=0 and final time t=1.
+    Unlike the diffusion on translations, much of this class is written for a scaling between an initial time t=0 and final time t=1.
     """
 
     def __init__(
@@ -166,7 +168,7 @@ class IGSO3:
         schedule="linear",
         L=2000,
     ):
-        """
+        """Initializes the IGSO3 diffusion class.
 
         Args:
             T: total number of time steps
@@ -174,6 +176,7 @@ class IGSO3:
             max_sigma: for exponential schedule, the largest scale parameter. Ignored for recommeded linear schedule
             min_b: lower value of beta in Ho schedule analogue
             max_b: upper value of beta in Ho schedule analogue
+            cache_dir: directory to store/load the IGSO3 values
             num_omega: discretization level in the angles across [0, pi]
             schedule: currently only linear and exponential are supported.  The exponential schedule may be noising too slowly.
             L: truncation level
@@ -199,9 +202,7 @@ class IGSO3:
         self.step_size = 1 / self.T
 
     def _calc_igso3_vals(self, L=2000):
-        """_calc_igso3_vals computes numerical approximations to the
-        relevant analytically intractable functionals of the igso3
-        distribution.
+        """Computes numerical approximations to the relevant analytically intractable functionals of the igso3 distribution.
 
         The calculated values are cached, or loaded from cache if they already
         exist.
@@ -209,7 +210,10 @@ class IGSO3:
         Args:
             L: truncation level for power series expansion of the pdf.
         """
-        replace_period = lambda x: str(x).replace(".", "_")
+
+        def replace_period(x):
+            return str(x).replace(".", "_")
+
         if self.schedule == "linear":
             cache_fname = os.path.join(
                 self.cache_dir,
@@ -237,7 +241,7 @@ class IGSO3:
                 num_sigma=self.num_sigma,
                 min_sigma=self.min_sigma,
                 max_sigma=self.max_sigma,
-                num_omega=self.num_omega
+                num_omega=self.num_omega,
             )
             write_pkl(cache_fname, igso3_vals)
 
@@ -245,16 +249,15 @@ class IGSO3:
 
     @property
     def discrete_sigma(self):
+        """Returns the discretized sigma values for IGSO(3) initialization."""
         return self.igso3_vals["discrete_sigma"]
 
     def sigma_idx(self, sigma: np.ndarray):
-        """
-        Calculates the index for discretized sigma during IGSO(3) initialization."""
+        """Calculates the index for discretized sigma during IGSO(3) initialization."""
         return np.digitize(sigma, self.discrete_sigma) - 1
 
     def t_to_idx(self, t: np.ndarray):
-        """
-        Helper function to go from discrete time index t to corresponding sigma_idx.
+        """Helper function to go from discrete time index t to corresponding sigma_idx.
 
         Args:
             t: time index (integer between 1 and 200)
@@ -263,13 +266,12 @@ class IGSO3:
         return self.sigma_idx(self.sigma(continuous_t))
 
     def sigma(self, t: torch.tensor):
-        """
-        Extract \sigma(t) corresponding to chosen sigma schedule.
+        r"""Extract \sigma(t) corresponding to chosen sigma schedule.
 
         Args:
             t: torch tensor with time between 0 and 1
         """
-        if not type(t) == torch.Tensor:
+        if not isinstance(t, torch.Tensor):
             t = torch.tensor(t)
         if torch.any(t < 0) or torch.any(t > 1):
             raise ValueError(f"Invalid t={t}")
@@ -287,8 +289,7 @@ class IGSO3:
             raise ValueError(f"Unrecognize schedule {self.schedule}")
 
     def g(self, t):
-        """
-        g returns the drift coefficient at time t
+        r"""Returns the drift coefficient at time t.
 
         since
             sigma(t)^2 := \int_0^t g(s)^2 ds,
@@ -307,13 +308,12 @@ class IGSO3:
         return torch.sqrt(grads)
 
     def sample(self, ts, n_samples=1):
-        """
-        sample uses the inverse cdf to sample an angle of rotation from
-        IGSO(3)
+        """Uses the inverse cdf to sample an angle of rotation from IGSO(3).
 
         Args:
             ts: array of integer time steps to sample from.
             n_samples: number of samples to draw.
+
         Returns:
         sampled angles of rotation. [len(ts), N]
         """
@@ -330,8 +330,7 @@ class IGSO3:
         return np.stack(all_samples, axis=0)
 
     def sample_vec(self, ts, n_samples=1):
-        """sample_vec generates a rotation vector(s) from IGSO(3) at time steps
-        ts.
+        """Generates a rotation vector(s) from IGSO(3) at time steps ts.
 
         Return:
             Sampled vector of shape [len(ts), N, 3]
@@ -341,11 +340,12 @@ class IGSO3:
         return x * self.sample(ts, n_samples=n_samples)[..., None]
 
     def score_norm(self, t, omega):
-        """
-        score_norm computes the score norm based on the time step and angle
+        """Computes the score norm based on the time step and angle.
+
         Args:
             t: integer time step
             omega: angles (scalar or shape [N])
+
         Return:
             score_norm with same shape as omega
         """
@@ -358,8 +358,9 @@ class IGSO3:
         return score_norm_t
 
     def score_vec(self, ts, vec):
-        """score_vec computes the score of the IGSO(3) density as a rotation
-        vector. This score vector is in the direction of the sampled vector,
+        """Computes the score of the IGSO(3) density as a rotation vector.
+
+        This score vector is in the direction of the sampled vector,
         and has magnitude given by score_norms.
 
         In particular, Rt @ hat(score_vec(ts, vec)) is what is referred to as
@@ -369,6 +370,7 @@ class IGSO3:
         Args:
             ts: times of shape [T]
             vec: where to compute the score of shape [T, N, 3]
+
         Returns:
             score vectors of shape [T, N, 3]
         """
@@ -388,14 +390,12 @@ class IGSO3:
         return score_norm * vec / omega[..., None]
 
     def exp_score_norm(self, ts):
-        """exp_score_norm returns the expected value of norm of the score for
-        IGSO(3) with time parameter ts of shape [T].
-        """
+        """exp_score_norm returns the expected value of norm of the score for IGSO(3) with time parameter ts of shape [T]."""
         sigma_idcs = [self.t_to_idx(t) for t in ts]
         return self.igso3_vals["exp_score_norms"][sigma_idcs]
 
     def diffuse_frames(self, xyz, t_list, diffusion_mask=None):
-        """diffuse_frames samples from the IGSO(3) distribution to noise frames
+        """diffuse_frames samples from the IGSO(3) distribution to noise frames.
 
         Parameters:
             xyz (np.array or torch.tensor, required): (L,3,3) set of backbone coordinates
@@ -404,7 +404,6 @@ class IGSO3:
             np.array : N/CA/C coordinates for each residue
                         (T,L,3,3), where T is num timesteps
         """
-
         if torch.is_tensor(xyz):
             xyz = xyz.numpy()
 
@@ -441,7 +440,7 @@ class IGSO3:
             + Ca[None, :, None].numpy()
         )
 
-        if t_list != None:
+        if t_list is not None:
             idx = [i - 1 for i in t_list]
             perturbed_crds = perturbed_crds[idx]
             R_perturbed = R_perturbed[idx]
@@ -454,8 +453,7 @@ class IGSO3:
     def reverse_sample_vectorized(
         self, R_t, R_0, t, noise_level, mask=None, return_perturb=False
     ):
-        """reverse_sample uses an approximation to the IGSO3 score to sample
-        a rotation at the previous time step.
+        """reverse_sample uses an approximation to the IGSO3 score to sample a rotation at the previous time step.
 
         Roughly - this update follows the reverse time SDE for Reimannian
         manifolds proposed by de Bortoli et al. Theorem 1 [1]. But with an
@@ -473,6 +471,7 @@ class IGSO3:
         B't are Brownian motions. The formula for g(t) obtains from equation 9
         of [2], from which this sampling function may be generalized to
         alternative noising schedules.
+
         Args:
             R_t: noisy rotation of shape [N, 3, 3]
             R_0: prediction of un-noised rotation
@@ -483,6 +482,8 @@ class IGSO3:
             mask: whether the residue is to be updated.  A value of 1 means the
                 rotation is not updated from r_t.  A value of 0 means the
                 rotation is updated.
+            return_perturb: whether to return the perturbation instead of the new rotation matrix
+
         Return:
             sampled rotation matrix for time t-1 of shape [3, 3]
         Reference:
@@ -538,7 +539,7 @@ class IGSO3:
 
 
 class Diffuser:
-    # wrapper for yielding diffused coordinates
+    """Wrapper for yielding diffused coordinates."""
 
     def __init__(
         self,
@@ -559,14 +560,13 @@ class Diffuser:
         partial_T=None,
         truncation_level=2000,
     ):
-        """
-        Parameters:
+        """Wrapper for yielding diffused coordinates.
 
-            T (int, required): Number of steps in the schedule
+        T (int, required): Number of steps in the schedule
 
-            b_0 (float, required): Starting variance for Euclidean schedule
+        b_0 (float, required): Starting variance for Euclidean schedule
 
-            b_T (float, required): Ending variance for Euclidean schedule
+        b_T (float, required): Ending variance for Euclidean schedule
 
         """
         self.T = T
@@ -606,9 +606,7 @@ class Diffuser:
         diffusion_mask=None,
         t_list=None,
     ):
-        """
-        Given full atom xyz, sequence and atom mask, diffuse the protein frame
-        translations and rotations
+        """Given full atom xyz, sequence and atom mask, diffuse the protein frame translations and rotations.
 
         Parameters:
 
@@ -624,11 +622,10 @@ class Diffuser:
 
 
         """
-
         if diffusion_mask is None:
             diffusion_mask = torch.zeros(len(xyz.squeeze())).to(dtype=bool)
 
-        get_allatom = ComputeAllAtomCoords().to(device=xyz.device)
+        # get_allatom = ComputeAllAtomCoords().to(device=xyz.device)
         L = len(xyz)
 
         # bring to origin and scale
@@ -671,9 +668,7 @@ class Diffuser:
         # The coordinates of the translated AND rotated frames
         diffused_BB = (
             torch.from_numpy(diffused_frame_crds) + cum_delta[:, :, None, :]
-        ).transpose(
-            0, 1
-        )  # [n,L,3,3]
+        ).transpose(0, 1)  # [n,L,3,3]
         # diffused_BB  = torch.from_numpy(diffused_frame_crds).transpose(0,1)
 
         # diffused_BB is [t_steps,L,3,3]
