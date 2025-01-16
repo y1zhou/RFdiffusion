@@ -48,7 +48,8 @@ def main(conf: BaseConfig) -> None:  # noqa: D103
 
     # Check for available GPU and print result of check
     if torch.cuda.is_available():
-        device_name = torch.cuda.get_device_name(torch.cuda.current_device())
+        device = torch.device(torch.cuda.current_device())
+        device_name = torch.cuda.get_device_name(device)
         log.info(
             f"Found GPU with device_name {device_name}. Will run RFdiffusion on {device_name}"
         )
@@ -56,6 +57,7 @@ def main(conf: BaseConfig) -> None:  # noqa: D103
         log.info("////////////////////////////////////////////////")
         log.info("///// NO GPU DETECTED! Falling back to CPU /////")
         log.info("////////////////////////////////////////////////")
+        device = torch.device("cpu")
 
     # Initialize sampler and target/contig.
     sampler = iu.sampler_selector(conf)
@@ -94,23 +96,43 @@ def main(conf: BaseConfig) -> None:  # noqa: D103
         seq_stack = []
         plddt_stack = []
 
-        if sampler.inf_conf.model_runner == "MultiStateSampler":
+        if sampler.inf_conf.model_runner == "DuoStateSampler":
             x_init, x_init2 = x_init
             seq_init, seq_init2 = seq_init
-            x_t2 = torch.clone(x_init2)
-            seq_t2 = torch.clone(seq_init2)
-        x_t = torch.clone(x_init)
-        seq_t = torch.clone(seq_init)
+            x_t2 = torch.clone(x_init2).to(device)
+            seq_t2 = torch.clone(seq_init2).to(device)
+        x_t = torch.clone(x_init).to(device)
+        seq_t = torch.clone(seq_init).to(device)
         # Loop over number of reverse diffusion time steps.
         for t in range(int(sampler.t_step_input), sampler.inf_conf.final_step - 1, -1):
-            px0, x_t, seq_t, plddt = sampler.sample_step(
-                t=t, x_t=x_t, seq_init=seq_t, final_step=sampler.inf_conf.final_step
-            )
+            if sampler.inf_conf.model_runner == "DuoStateSampler":
+                (
+                    px0_s1,
+                    x_t_s1,
+                    seq_t_s1,
+                    plddt_s1,
+                    px0_s2,
+                    x_t_1_s2,
+                    seq_t_1_s2,
+                    plddt_s2,
+                ) = sampler.sample_step(
+                    t=t,
+                    x_t=x_t,
+                    seq_init=seq_t,
+                    final_step=sampler.inf_conf.final_step,
+                    x_t2=x_t2,
+                    seq_init2=seq_t2,
+                )
+            else:
+                px0, x_t, seq_t, plddt = sampler.sample_step(
+                    t=t, x_t=x_t, seq_init=seq_t, final_step=sampler.inf_conf.final_step
+                )
             px0_xyz_stack.append(px0)
             denoised_xyz_stack.append(x_t)
             seq_stack.append(seq_t)
             plddt_stack.append(plddt[0])  # remove singleton leading dimension
 
+        # TODO: save results for DuoStateSampler
         # Flip order for better visualization in pymol
         denoised_xyz_stack = torch.stack(denoised_xyz_stack)
         denoised_xyz_stack = torch.flip(

@@ -475,7 +475,16 @@ class Sampler:
                     pot.diffuser = self.diffuser
         return xt, seq_t
 
-    def _preprocess(self, seq, xyz_t, t, repack=False):
+    def _preprocess(
+        self,
+        seq,
+        xyz_t,
+        t,
+        repack=False,
+        hotspot_res=None,
+        contigmap=None,
+        mask_str=None,
+    ):
         """Prepare inputs to diffusion model.
 
         seq (L,22) one-hot sequence
@@ -502,6 +511,12 @@ class Sampler:
         # T = self.T
         # binderlen = self.binderlen
         # target_res = self.ppi_conf.hotspot_res
+        if hotspot_res is None:
+            hotspot_res = self.ppi_conf.hotspot_res
+        if contigmap is None:
+            contigmap = self.contig_map
+        if mask_str is None:
+            mask_str = self.mask_str
 
         ##################
         ### msa_masked ###
@@ -537,8 +552,8 @@ class Sampler:
 
         # Set timestep feature to 1 where diffusion mask is True, else 1-t/T
         timefeature = torch.zeros(L).float()
-        timefeature[self.mask_str.squeeze()] = 1
-        timefeature[~self.mask_str.squeeze()] = 1 - t / self.T
+        timefeature[mask_str.squeeze()] = 1
+        timefeature[~mask_str.squeeze()] = 1 - t / self.T
         timefeature = timefeature[None, None, ..., None]
 
         t1d = torch.cat((t1d, timefeature), dim=-1).float()
@@ -549,7 +564,7 @@ class Sampler:
         if self.preprocess_conf.sidechain_input:
             xyz_t[torch.where(seq == 21, True, False), 3:, :] = float("nan")
         else:
-            xyz_t[~self.mask_str.squeeze(), 3:, :] = float("nan")
+            xyz_t[~mask_str.squeeze(), 3:, :] = float("nan")
 
         xyz_t = xyz_t[None, None]
         xyz_t = torch.cat((xyz_t, torch.full((1, 1, L, 13, 3), float("nan"))), dim=3)
@@ -562,7 +577,7 @@ class Sampler:
         ###########
         ### idx ###
         ###########
-        idx = torch.tensor(self.contig_map.rf)[None]
+        idx = torch.tensor(contigmap.rf, device=self.device)[None]
 
         ###############
         ### alpha_t ###
@@ -592,18 +607,18 @@ class Sampler:
         ######################
         if self.preprocess_conf.d_t1d >= 24:  # add hotspot residues
             hotspot_tens = torch.zeros(L).float()
-            if self.ppi_conf.hotspot_res is None:
+            if hotspot_res is None:
                 print(
                     "WARNING: you're using a model trained on complexes and hotspot residues, without specifying hotspots.\
                          If you're doing monomer diffusion this is fine"
                 )
                 hotspot_idx = []
             else:
-                hotspots = [(i[0], int(i[1:])) for i in self.ppi_conf.hotspot_res]
+                hotspots = [(i[0], int(i[1:])) for i in hotspot_res]
                 hotspot_idx = []
-                for i, res in enumerate(self.contig_map.con_ref_pdb_idx):
+                for i, res in enumerate(contigmap.con_ref_pdb_idx):
                     if res in hotspots:
-                        hotspot_idx.append(self.contig_map.hal_idx0[i])
+                        hotspot_idx.append(contigmap.hal_idx0[i])
                 hotspot_tens[hotspot_idx] = 1.0
 
             # Add blank (legacy) feature and hotspot tensor
@@ -1116,7 +1131,7 @@ class ScaffoldedSampler(SelfConditioning):
         return msa_masked, msa_full, seq, xyz_prev, idx_pdb, t1d, t2d, xyz_t, alpha_t
 
 
-class MultiStateSampler(SelfConditioning):
+class DuoStateSampler(SelfConditioning):
     """Model Runner for Multi-State diffusion."""
 
     def sample_init(self, return_forward_trajectory=False):
@@ -1132,6 +1147,9 @@ class MultiStateSampler(SelfConditioning):
         # Initialize features for the regular input
         xt_regular, seq_t_regular = super().sample_init(return_forward_trajectory)
 
+        # list of two tensors to hold the previous step predictions
+        self.prev_pred = [None, None]
+
         # Initialize features for the second state
         # Note that the certain modules can be shared between the two states
 
@@ -1139,7 +1157,7 @@ class MultiStateSampler(SelfConditioning):
         ### Parse input pdb ###
         #######################
         self.target_feats2 = iu.process_target(
-            self._conf.multistate.pdb_path, parse_hetatom=True, center=False
+            self._conf.duostate.pdb_path, parse_hetatom=True, center=False
         )
         # TODO: SVDSuperimposer or similar to align the two binder chains
 
@@ -1148,9 +1166,9 @@ class MultiStateSampler(SelfConditioning):
         ################################
 
         # Generate a specific contig from the range of possibilities specified at input
-        self._log.info(f"Using contig: {self._conf.multistate.contigmap.contigs}")
+        self._log.info(f"Using contig: {self._conf.duostate.contigmap.contigs}")
         self.contig_map2 = ContigMap(
-            self.target_feats2, **self._conf.multistate.contigmap
+            self.target_feats2, **self._conf.duostate.contigmap
         )
         self.mappings2 = self.contig_map2.get_mappings()
         self.mask_seq2 = torch.from_numpy(self.contig_map2.inpaint_seq)[None, :]
@@ -1165,7 +1183,7 @@ class MultiStateSampler(SelfConditioning):
         ####################
 
         self.hotspot_0idx2 = iu.get_idx0_hotspots(
-            self.mappings2, self._conf.multistate.ppi, self.binderlen
+            self.mappings2, self._conf.duostate.ppi, self.binderlen
         )
 
         ###################################
@@ -1226,7 +1244,7 @@ class MultiStateSampler(SelfConditioning):
         seq_t[contig_map.hal_idx0] = seq_orig[contig_map.ref_idx0]
 
         # Unmask sequence if desired
-        if self._conf.multistate.contigmap.provide_seq is not None:
+        if self._conf.duostate.contigmap.provide_seq is not None:
             seq_t[self.mask_seq2.squeeze()] = seq_orig[self.mask_seq2.squeeze()]
 
         seq_t[~self.mask_seq2.squeeze()] = 21
@@ -1251,3 +1269,189 @@ class MultiStateSampler(SelfConditioning):
         self._log.info(f"Sequence2 init: {seq2chars(torch.argmax(seq_t, dim=-1))}")
 
         return (xt_regular, xt), (seq_t_regular, seq_t)
+
+    def _sample_step(
+        self,
+        *,
+        t,
+        x_t,
+        seq_init,
+        final_step,
+        prev_pred_idx,
+        hotspot_res,
+        contigmap,
+        mask_str,
+        diffusion_mask,
+        denoiser,
+    ):
+        """Generate the next pose that the model should be supplied at timestep t-1.
+
+        Args:
+            t (int): The timestep that has just been predicted
+            seq_t (torch.tensor): (L,22) The sequence at the beginning of this timestep
+            x_t (torch.tensor): (L,14,3) The residue positions at the beginning of this timestep
+            seq_init (torch.tensor): (L,22) The initialized sequence used in updating the sequence.
+            final_step (int): The final step of the diffusion process.
+            prev_pred_idx (int): The index of the previous prediction in the forward trajectory.
+            hotspot_res (List[str]): The hotspot residues to be used in the diffusion process.
+            contigmap (ContigMap): The contig map object used to generate the contig.
+            mask_str (torch.tensor): (L) The mask string used in the diffusion process.
+            diffusion_mask (torch.tensor): (L) The diffusion mask used in the diffusion process.
+            denoiser (Denoiser): The denoiser object used to denoise the predicted poses.
+
+        Returns:
+            px0: (L,14,3) The model's prediction of x0.
+            x_t_1: (L,14,3) The updated positions of the next step.
+            seq_t_1: (L, 22) The sequence to the next step (== seq_init)
+            plddt: (L, 1) Predicted lDDT of x0.
+        """
+        msa_masked, msa_full, seq_in, xt_in, idx_pdb, t1d, t2d, xyz_t, alpha_t = (
+            self._preprocess(
+                seq_init,
+                x_t,
+                t,
+                hotspot_res=hotspot_res,
+                contigmap=contigmap,
+                mask_str=mask_str,
+            )
+        )
+        B, N, L = xyz_t.shape[:3]
+
+        ##################################
+        ######## Str Self Cond ###########
+        ##################################
+        if (t < self.diffuser.T) and (t != self.diffuser_conf.partial_T):
+            zeros = torch.zeros(B, 1, L, 24, 3).float().to(xyz_t.device)
+            xyz_t = torch.cat(
+                (self.prev_pred[prev_pred_idx].unsqueeze(1), zeros), dim=-2
+            )  # [B,T,L,27,3]
+            t2d_44 = xyz_to_t2d(xyz_t)  # [B,T,L,L,44]
+        else:
+            xyz_t = torch.zeros_like(xyz_t)
+            t2d_44 = torch.zeros_like(t2d[..., :44])
+        # No effect if t2d is only dim 44
+        t2d[..., :44] = t2d_44
+
+        if self.symmetry is not None:
+            idx_pdb, self.chain_idx = self.symmetry.res_idx_procesing(res_idx=idx_pdb)
+
+        ####################
+        ### Forward Pass ###
+        ####################
+
+        with torch.no_grad():
+            msa_prev, pair_prev, px0, state_prev, alpha, logits, plddt = self.model(
+                msa_masked,
+                msa_full,
+                seq_in,
+                xt_in,
+                idx_pdb,
+                t1d=t1d,
+                t2d=t2d,
+                xyz_t=xyz_t,
+                alpha_t=alpha_t,
+                msa_prev=None,
+                pair_prev=None,
+                state_prev=None,
+                t=torch.tensor(t),
+                return_infer=True,
+                motif_mask=diffusion_mask.squeeze().to(self.device),
+            )
+
+            if self.symmetry is not None and self.inf_conf.symmetric_self_cond:
+                px0 = self.symmetrise_prev_pred(px0=px0, seq_in=seq_in, alpha=alpha)[
+                    :, :, :3
+                ]
+
+        self.prev_pred[prev_pred_idx] = torch.clone(px0)
+
+        # prediction of X0
+        _, px0 = self.allatom(torch.argmax(seq_in, dim=-1), px0, alpha)
+        px0 = px0.squeeze()[:, :14]
+
+        ###########################
+        ### Generate Next Input ###
+        ###########################
+
+        seq_t_1 = torch.clone(seq_init)  # TODO: try designing the sequence as well
+        if t > final_step:
+            x_t_1, px0 = denoiser.get_next_pose(
+                xt=x_t,
+                px0=px0,
+                t=t,
+                diffusion_mask=mask_str.squeeze(),
+                align_motif=self.inf_conf.align_motif,
+                include_motif_sidechains=self.preprocess_conf.motif_sidechain_input,
+            )
+            self._log.info(
+                f"Timestep {t}, input to next step: {seq2chars(torch.argmax(seq_t_1, dim=-1).tolist())}"
+            )
+        else:
+            x_t_1 = torch.clone(px0).to(x_t.device)
+            px0 = px0.to(x_t.device)
+
+        ######################
+        ### Apply symmetry ###
+        ######################
+
+        if self.symmetry is not None:
+            x_t_1, seq_t_1 = self.symmetry.apply_symmetry(x_t_1, seq_t_1)
+
+        return px0, x_t_1, seq_t_1, plddt
+
+    def sample_step(self, *, t, x_t, seq_init, final_step, x_t2, seq_init2):
+        """Generate the next pose that the model should be supplied at timestep t-1.
+
+        Args:
+            t (int): The timestep that has just been predicted
+            seq_t (torch.tensor): (L,22) The sequence at the beginning of this timestep
+            x_t (torch.tensor): (L,14,3) The residue positions at the beginning of this timestep
+            seq_init (torch.tensor): (L,22) The initialized sequence used in updating the sequence.
+            final_step (int): The final step of the diffusion process.
+            x_t2 (torch.tensor): (L,14,3) The residue positions at the beginning of this timestep for the second state.
+            seq_init2 (torch.tensor): (L,22) The initialized sequence used in updating the sequence for the second state.
+
+        Returns:
+            px0: (L,14,3) The model's xyz coordinate prediction of x0.
+            x_t_1: (L,14,3) The updated (denoised) positions of the next step.
+            seq_t_1: (L) The sequence to the next step (== seq_init)
+            plddt: (L, 1) Predicted lDDT of x0.
+        """
+        px0_s1, x_t_s1, seq_t_s1, plddt_s1 = self._sample_step(
+            t=t,
+            x_t=x_t,
+            seq_init=seq_init,
+            final_step=final_step,
+            prev_pred_idx=0,
+            hotspot_res=self._conf.duostate.ppi.hotspot_res,
+            contigmap=self.contig_map,
+            mask_str=self.mask_str,
+            diffusion_mask=self.diffusion_mask,
+            denoiser=self.denoiser,
+        )
+        px0_s2, x_t_1_s2, seq_t_1_s2, plddt_s2 = self._sample_step(
+            t=t,
+            x_t=x_t2,
+            seq_init=seq_init2,
+            final_step=final_step,
+            prev_pred_idx=1,
+            hotspot_res=self._conf.duostate.ppi.hotspot_res,
+            contigmap=self.contig_map2,
+            mask_str=self.mask_str2,
+            diffusion_mask=self.diffusion_mask2,
+            denoiser=self.denoiser2,
+        )
+
+        # TODO: Align the two states based on the CA atoms in the binder chain
+        x_t_1_s1_binder = x_t_s1[: self.binderlen, 1, :]
+        x_t_1_s2_binder = x_t_1_s2[: self.binderlen, 1, :]
+        return (
+            px0_s1,
+            x_t_s1,
+            seq_t_s1,
+            plddt_s1,
+            px0_s2,
+            x_t_1_s2,
+            seq_t_1_s2,
+            plddt_s2,
+        )

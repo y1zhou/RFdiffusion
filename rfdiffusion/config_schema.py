@@ -186,7 +186,7 @@ class ScaffoldGuidedConfig:  # noqa: D101
 
 
 @dataclass
-class MultiStateConfig:
+class DuoStateConfig:
     """Configs for multi-state design.
 
     Attributes:
@@ -214,4 +214,4 @@ class BaseConfig(DictConfig):  # noqa: D101
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     scaffoldguided: ScaffoldGuidedConfig = field(default_factory=ScaffoldGuidedConfig)
-    multistate: MultiStateConfig = field(default_factory=MultiStateConfig)
+    duostate: DuoStateConfig = field(default_factory=DuoStateConfig)
