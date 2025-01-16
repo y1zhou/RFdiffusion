@@ -522,7 +522,7 @@ class Sampler:
         ##################
         ### msa_masked ###
         ##################
-        msa_masked = torch.zeros((1, 1, L, 48))
+        msa_masked = torch.zeros((1, 1, L, 48), device=self.device)
         msa_masked[:, :, :, :22] = seq[None, None]
         msa_masked[:, :, :, 22:44] = seq[None, None]
         msa_masked[:, :, 0, 46] = 1.0
@@ -531,7 +531,7 @@ class Sampler:
         ################
         ### msa_full ###
         ################
-        msa_full = torch.zeros((1, 1, L, 25))
+        msa_full = torch.zeros((1, 1, L, 25), device=self.device)
         msa_full[:, :, :, :22] = seq[None, None]
         msa_full[:, :, 0, 23] = 1.0
         msa_full[:, :, -1, 24] = 1.0
@@ -541,7 +541,7 @@ class Sampler:
         ###########
 
         # Here we need to go from one hot with 22 classes to one hot with 21 classes (last plane is missing token)
-        t1d = torch.zeros((1, 1, L, 21))
+        t1d = torch.zeros((1, 1, L, 21), device=self.device)
 
         seqt1d = torch.clone(seq)
         for idx in range(L):
@@ -552,7 +552,7 @@ class Sampler:
         t1d[:, :, :, :21] = seqt1d[None, None, :, :21]
 
         # Set timestep feature to 1 where diffusion mask is True, else 1-t/T
-        timefeature = torch.zeros(L).float()
+        timefeature = torch.zeros(L, device=self.device, dtype=torch.float32)
         timefeature[mask_str.squeeze()] = 1
         timefeature[~mask_str.squeeze()] = 1 - t / self.T
         timefeature = timefeature[None, None, ..., None]
@@ -568,7 +568,10 @@ class Sampler:
             xyz_t[~mask_str.squeeze(), 3:, :] = float("nan")
 
         xyz_t = xyz_t[None, None]
-        xyz_t = torch.cat((xyz_t, torch.full((1, 1, L, 13, 3), float("nan"))), dim=3)
+        xyz_t = torch.cat(
+            (xyz_t, torch.full((1, 1, L, 13, 3), float("nan"), device=self.device)),
+            dim=3,
+        )
 
         ###########
         ### t2d ###
@@ -585,7 +588,11 @@ class Sampler:
         ###############
         seq_tmp = t1d[..., :-1].argmax(dim=-1).reshape(-1, L)
         alpha, _, alpha_mask, _ = util.get_torsions(
-            xyz_t.reshape(-1, L, 27, 3), seq_tmp, TOR_INDICES, TOR_CAN_FLIP, REF_ANGLES
+            xyz_t.reshape(-1, L, 27, 3),
+            seq_tmp,
+            TOR_INDICES.to(self.device),
+            TOR_CAN_FLIP.to(self.device),
+            REF_ANGLES.to(self.device),
         )
         alpha_mask = torch.logical_and(alpha_mask, ~torch.isnan(alpha[..., 0]))
         alpha[torch.isnan(alpha)] = 0.0

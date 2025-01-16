@@ -495,29 +495,36 @@ class IGSO3:
         differential equations. arXiv preprint arXiv:2011.13456.
         """
         # compute rotation vector corresponding to prediction of how r_t goes to r_0
-        R_0, R_t = torch.tensor(R_0), torch.tensor(R_t)
+        R_0, R_t = R_0.detach().clone(), R_t.detach().clone()
         R_0t = torch.einsum("...ij,...kj->...ik", R_t, R_0)
         R_0t_rotvec = torch.tensor(
-            scipy_R.from_matrix(R_0t.cpu().numpy()).as_rotvec()
-        ).to(R_0.device)
+            scipy_R.from_matrix(R_0t.cpu().numpy()).as_rotvec(),
+            dtype=torch.float,
+            device=R_0.device,
+        )
 
         # Approximate the score based on the prediction of R0.
         # R_t @ hat(Score_approx) is the score approximation in the Lie algebra
         # SO(3) (i.e. the output of Algorithm 1)
-        Omega = torch.linalg.norm(R_0t_rotvec, axis=-1).numpy()
-        Score_approx = R_0t_rotvec * (self.score_norm(t, Omega) / Omega)[:, None]
+        Omega = torch.linalg.norm(R_0t_rotvec, axis=-1).cpu().numpy()
+        Score_approx = R_0t_rotvec * torch.tensor(
+            (self.score_norm(t, Omega) / Omega)[:, None],
+            dtype=torch.float,
+            device=R_0.device,
+        )
 
         # Compute scaling for score and sampled noise (following Eq 6 of [2])
         continuous_t = t / self.T
-        rot_g = self.g(continuous_t).to(Score_approx.device)
+        rot_g = self.g(continuous_t).to(R_0.device)
 
         # Sample and scale noise to add to the rotation perturbation in the
         # SO(3) tangent space.  Since IG-SO(3) is the Brownian motion on SO(3)
         # (up to a deceleration of time by a factor of two), for small enough
         # time-steps, this is equivalent to perturbing r_t with IG-SO(3) noise.
         # See e.g. Algorithm 1 of De Bortoli et al.
-        Z = np.random.normal(size=(R_0.shape[0], 3))
-        Z = torch.from_numpy(Z).to(Score_approx.device)
+        # Z = np.random.normal(size=(R_0.shape[0], 3))
+        # Z = torch.from_numpy(Z).to(Score_approx.device)
+        Z = torch.normal(mean=0.0, std=1.0, size=(R_0.shape[0], 3), device=R_0.device)
         Z *= noise_level
 
         Delta_r = (rot_g**2) * self.step_size * Score_approx
@@ -525,10 +532,12 @@ class IGSO3:
         # Sample perturbation from discretized SDE (following eq. 6 of [2]),
         # This approximate sampling from IGSO3(* ; Delta_r, rot_g^2 *
         # self.step_size) with tangent Gaussian.
-        Perturb_tangent = Delta_r + rot_g * np.sqrt(self.step_size) * Z
+        Perturb_tangent = (
+            Delta_r + rot_g * torch.tensor(self.step_size, device=R_0.device).sqrt() * Z
+        )
         if mask is not None:
             Perturb_tangent *= (1 - mask.long())[:, None, None]
-        Perturb = igso3.Exp(Perturb_tangent)
+        Perturb = igso3.Exp(Perturb_tangent.cpu()).to(R_0.device, dtype=torch.float)
 
         if return_perturb:
             return Perturb
@@ -623,7 +632,9 @@ class Diffuser:
 
         """
         if diffusion_mask is None:
-            diffusion_mask = torch.zeros(len(xyz.squeeze())).to(dtype=bool)
+            diffusion_mask = torch.zeros(
+                len(xyz.squeeze()), dtype=torch.bool, device=xyz.device
+            )
 
         # get_allatom = ComputeAllAtomCoords().to(device=xyz.device)
         L = len(xyz)
