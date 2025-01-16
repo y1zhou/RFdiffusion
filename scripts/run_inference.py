@@ -108,8 +108,8 @@ def main(conf: BaseConfig) -> None:  # noqa: D103
             if sampler.inf_conf.model_runner == "DuoStateSampler":
                 (
                     px0_s1,
-                    x_t_s1,
-                    seq_t_s1,
+                    x_t_1_s1,
+                    seq_t_1_s1,
                     plddt_s1,
                     px0_s2,
                     x_t_1_s2,

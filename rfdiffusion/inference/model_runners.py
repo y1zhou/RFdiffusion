@@ -20,6 +20,7 @@ from rfdiffusion.kinematics import get_init_xyz, xyz_to_t2d
 from rfdiffusion.model_input_logger import pickle_function_call
 from rfdiffusion.potentials.manager import PotentialManager
 from rfdiffusion.RoseTTAFoldModel import RoseTTAFoldModule
+from rfdiffusion.util import align_and_rmsd
 from rfdiffusion.util_module import ComputeAllAtomCoords
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -53,7 +54,7 @@ class Sampler:
         """
         self._log = logging.getLogger(__name__)
         if torch.cuda.is_available():
-            self.device = torch.device("cuda")
+            self.device = torch.device(torch.cuda.current_device())
         else:
             self.device = torch.device("cpu")
         needs_model_reload = (
@@ -1145,7 +1146,7 @@ class DuoStateSampler(SelfConditioning):
             seq_t: Starting sequence with a portion of them set to unknown.
         """
         # Initialize features for the regular input
-        xt_regular, seq_t_regular = super().sample_init(return_forward_trajectory)
+        xt_s1, seq_t_s1 = super().sample_init(return_forward_trajectory)
 
         # list of two tensors to hold the previous step predictions
         self.prev_pred = [None, None]
@@ -1240,35 +1241,37 @@ class DuoStateSampler(SelfConditioning):
         ### Generate initial sequence ###
         #################################
 
-        seq_t = torch.full((1, L_mapped), 21).squeeze()  # 21 is the mask token
-        seq_t[contig_map.hal_idx0] = seq_orig[contig_map.ref_idx0]
+        seq_t_s2 = torch.full((1, L_mapped), 21).squeeze()  # 21 is the mask token
+        seq_t_s2[contig_map.hal_idx0] = seq_orig[contig_map.ref_idx0]
 
         # Unmask sequence if desired
         if self._conf.duostate.contigmap.provide_seq is not None:
-            seq_t[self.mask_seq2.squeeze()] = seq_orig[self.mask_seq2.squeeze()]
+            seq_t_s2[self.mask_seq2.squeeze()] = seq_orig[self.mask_seq2.squeeze()]
 
-        seq_t[~self.mask_seq2.squeeze()] = 21
-        seq_t = torch.nn.functional.one_hot(seq_t, num_classes=22).float()  # [L,22]
+        seq_t_s2[~self.mask_seq2.squeeze()] = 21
+        seq_t_s2 = torch.nn.functional.one_hot(
+            seq_t_s2, num_classes=22
+        ).float()  # [L,22]
         seq_orig = torch.nn.functional.one_hot(
             seq_orig, num_classes=22
         ).float()  # [L,22]
 
         fa_stack, xyz_true = self.diffuser.diffuse_pose(
             xyz_mapped,
-            torch.clone(seq_t),
+            torch.clone(seq_t_s2),
             atom_mask_mapped.squeeze(),
             diffusion_mask=self.diffusion_mask2.squeeze(),
             t_list=t_list,
         )
         xT = fa_stack[-1].squeeze()[:, :14, :]
-        xt = torch.clone(xT)
+        xt_s2 = torch.clone(xT)
 
         self.denoiser2 = self.construct_denoiser(
             len(self.contig_map2.ref), visible=self.mask_seq2.squeeze()
         )
-        self._log.info(f"Sequence2 init: {seq2chars(torch.argmax(seq_t, dim=-1))}")
+        self._log.info(f"Sequence2 init: {seq2chars(torch.argmax(seq_t_s2, dim=-1))}")
 
-        return (xt_regular, xt), (seq_t_regular, seq_t)
+        return (xt_s1, xt_s2), (seq_t_s1, seq_t_s2)
 
     def _sample_step(
         self,
@@ -1417,7 +1420,7 @@ class DuoStateSampler(SelfConditioning):
             seq_t_1: (L) The sequence to the next step (== seq_init)
             plddt: (L, 1) Predicted lDDT of x0.
         """
-        px0_s1, x_t_s1, seq_t_s1, plddt_s1 = self._sample_step(
+        px0_s1, x_t_1_s1, seq_t_1_s1, plddt_s1 = self._sample_step(
             t=t,
             x_t=x_t,
             seq_init=seq_init,
@@ -1443,12 +1446,31 @@ class DuoStateSampler(SelfConditioning):
         )
 
         # TODO: Align the two states based on the CA atoms in the binder chain
-        x_t_1_s1_binder = x_t_s1[: self.binderlen, 1, :]
+        # No need to do this for px0 because it happens in denoiser.get_next_pose
+        x_t_1_s1_binder = x_t_1_s1[: self.binderlen, 1, :]
         x_t_1_s2_binder = x_t_1_s2[: self.binderlen, 1, :]
+        state_rmsd, rot_matrix = align_and_rmsd(x_t_1_s1_binder, x_t_1_s2_binder)
+        self._log.info(f"Binder RMSD between states in step {t}: {state_rmsd:.2f}")
+
+        # Translate and rotate to state1
+        s2_seq_len, n_atom = x_t_1_s2.shape[:2]
+        x_t_1_s1_backbone_mean = x_t_1_s1[:, :3].reshape(-1, 3).mean(0)
+        x_t_1_s2_backbone_mean = x_t_1_s2[:, :3].reshape(-1, 3).mean(0)
+        s2_atom_mask = ~torch.isnan(x_t_1_s2)
+
+        x_t_1_s2[~s2_atom_mask] = 0.0  # need to fill NaNs for the rotation
+        x_t_1_s2 = (
+            # center on the mean of the backbone atoms and rotate
+            ((x_t_1_s2.reshape(-1, 3) - x_t_1_s2_backbone_mean) @ rot_matrix)
+            # translate to the mean of the backbone atoms in state 1
+            + x_t_1_s1_backbone_mean
+        ).reshape(s2_seq_len, n_atom, 3)
+        x_t_1_s2[~s2_atom_mask] = float("nan")
+
         return (
             px0_s1,
-            x_t_s1,
-            seq_t_s1,
+            x_t_1_s1,
+            seq_t_1_s1,
             plddt_s1,
             px0_s2,
             x_t_1_s2,

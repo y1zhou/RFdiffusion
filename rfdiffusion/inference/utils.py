@@ -531,8 +531,8 @@ def sampler_selector(conf: BaseConfig):
             sampler = model_runners.SelfConditioning(conf)
         elif conf.inference.model_runner == "ScaffoldedSampler":
             sampler = model_runners.ScaffoldedSampler(conf)
-        elif conf.inference.model_runner == "MultiStateSampler":
-            sampler = model_runners.MultiStateSampler(conf)
+        elif conf.inference.model_runner == "DuoStateSampler":
+            sampler = model_runners.DuoStateSampler(conf)
         else:
             raise ValueError(f"Unrecognized sampler {conf.inference.model_runner}")
     return sampler

@@ -917,3 +917,41 @@ def calc_rmsd(xyz1, xyz2, eps=1e-6):
     rmsd = np.sqrt(np.sum((xyz2_ - xyz1) * (xyz2_ - xyz1), axis=(0, 1)) / L + eps)
 
     return rmsd, U
+
+
+def align_and_rmsd(xyz1, xyz2, eps=1e-6):
+    """Compute RMSD and alignment using torch.linalg.svd.
+
+    Args:
+        xyz1 (torch.Tensor): First coordinate set, shape [L, 3].
+        xyz2 (torch.Tensor): Second coordinate set, shape [L, 3].
+        eps (float, optional): Small float to avoid division by zero.
+
+    Returns:
+        tuple: (rmsd, U) where rmsd is the root-mean-square deviation, U is rotation matrix.
+    """
+    # center to CA centroid
+    xyz1 = xyz1 - xyz1.mean(0)
+    xyz2 = xyz2 - xyz2.mean(0)
+
+    # Computation of the covariance matrix
+    C = xyz2.T @ xyz1
+
+    # Compute otimal rotation matrix using SVD
+    V, S, W = torch.linalg.svd(C)
+
+    # get sign to ensure right-handedness
+    d = torch.ones((3, 3), device=xyz1.device)
+    d[:, -1] = torch.sign(torch.linalg.det(V) * torch.linalg.det(W))
+
+    # Rotation matrix U
+    U = (d * V) @ W
+
+    # Rotate xyz2
+    xyz2_ = xyz2 @ U
+    L = xyz2_.shape[0]
+    rmsd = torch.sqrt(
+        torch.sum((xyz2_ - xyz1) * (xyz2_ - xyz1), dim=(0, 1)) / L + eps
+    ).item()
+
+    return rmsd, U
