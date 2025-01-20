@@ -700,10 +700,8 @@ class Diffuser:
         ##### Now combine all the diffused quantities to make full atom diffused poses
         tick = time.time()
         cum_delta = deltas.cumsum(dim=1)
-        # The coordinates of the translated AND rotated frames
-        diffused_BB = (
-            torch.tensor(diffused_frame_crds) + cum_delta[:, :, None, :]
-        ).transpose(0, 1)  # [n,L,3,3]
+        # The coordinates of the translated AND rotated frames [n,L,3,3]
+        diffused_BB = (diffused_frame_crds + cum_delta[:, :, None, :]).transpose(0, 1)
         # diffused_BB  = torch.from_numpy(diffused_frame_crds).transpose(0,1)
 
         # diffused_BB is [t_steps,L,3,3]
