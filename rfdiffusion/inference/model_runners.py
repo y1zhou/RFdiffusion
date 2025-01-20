@@ -150,7 +150,9 @@ class Sampler:
         # Check for cache schedule
         if not os.path.exists(schedule_directory):
             os.mkdir(schedule_directory)
-        self.diffuser = Diffuser(**self._conf.diffuser, cache_dir=schedule_directory)
+        self.diffuser = Diffuser(
+            **self._conf.diffuser, cache_dir=schedule_directory, device=self.device
+        )
 
         ###########################
         ### Initialise Symmetry ###
@@ -175,7 +177,10 @@ class Sampler:
                 script_dir, "../../examples/input_pdbs/1qys.pdb"
             )
         self.target_feats = iu.process_target(
-            self.inf_conf.input_pdb, parse_hetatom=True, center=False
+            self.inf_conf.input_pdb,
+            parse_hetatom=True,
+            center=False,
+            device=self.device,
         )
         self.chain_idx = None
 
@@ -302,7 +307,10 @@ class Sampler:
         #######################
 
         self.target_feats = iu.process_target(
-            self.inf_conf.input_pdb, parse_hetatom=True, center=False
+            self.inf_conf.input_pdb,
+            parse_hetatom=True,
+            center=False,
+            device=self.device,
         )
 
         ################################
@@ -398,7 +406,9 @@ class Sampler:
         ### Generate initial sequence ###
         #################################
 
-        seq_t = torch.full((1, L_mapped), 21).squeeze()  # 21 is the mask token
+        seq_t = torch.full(
+            (1, L_mapped), 21, device=self.device
+        ).squeeze()  # 21 is the mask token
         seq_t[contig_map.hal_idx0] = seq_orig[contig_map.ref_idx0]
 
         # Unmask sequence if desired
@@ -1165,7 +1175,10 @@ class DuoStateSampler(SelfConditioning):
         ### Parse input pdb ###
         #######################
         self.target_feats2 = iu.process_target(
-            self._conf.duostate.pdb_path, parse_hetatom=True, center=False
+            self._conf.duostate.pdb_path,
+            parse_hetatom=True,
+            center=False,
+            device=self.device,
         )
 
         ################################
@@ -1247,7 +1260,9 @@ class DuoStateSampler(SelfConditioning):
         ### Generate initial sequence ###
         #################################
 
-        seq_t_s2 = torch.full((1, L_mapped), 21).squeeze()  # 21 is the mask token
+        seq_t_s2 = torch.full(
+            (1, L_mapped), 21, device=self.device
+        ).squeeze()  # 21 is the mask token
         seq_t_s2[contig_map.hal_idx0] = seq_orig[contig_map.ref_idx0]
 
         # Unmask sequence if desired

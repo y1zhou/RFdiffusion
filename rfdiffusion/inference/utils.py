@@ -639,7 +639,7 @@ def parse_pdb_lines(lines, parse_hetatom=False, ignore_het_h=True):
     return out
 
 
-def process_target(pdb_path, parse_hetatom=False, center=True):
+def process_target(pdb_path, parse_hetatom=False, center=True, device="cpu"):
     """Prepare features for the target protein."""
     # Read target pdb and extract features.
     target_struct = parse_pdb(pdb_path, parse_hetatom=parse_hetatom)
@@ -648,16 +648,16 @@ def process_target(pdb_path, parse_hetatom=False, center=True):
     ca_center = target_struct["xyz"][:, :1, :].mean(axis=0, keepdims=True)
     if not center:
         ca_center = 0
-    xyz = torch.from_numpy(target_struct["xyz"] - ca_center)
-    seq_orig = torch.from_numpy(target_struct["seq"])
-    atom_mask = torch.from_numpy(target_struct["mask"])
+    xyz = torch.from_numpy(target_struct["xyz"] - ca_center).to(device)
+    seq_orig = torch.from_numpy(target_struct["seq"]).to(device)
+    atom_mask = torch.from_numpy(target_struct["mask"]).to(device)
     seq_len = len(xyz)
 
     # Make 27 atom representation
-    xyz_27 = torch.full((seq_len, 27, 3), np.nan).float()
+    xyz_27 = torch.full((seq_len, 27, 3), np.nan, device=device).float()
     xyz_27[:, :14, :] = xyz[:, :14, :]
 
-    mask_27 = torch.full((seq_len, 27), False)
+    mask_27 = torch.full((seq_len, 27), False, device=device)
     mask_27[:, :14] = atom_mask
     out = {
         "xyz_27": xyz_27,
@@ -666,7 +666,7 @@ def process_target(pdb_path, parse_hetatom=False, center=True):
         "pdb_idx": target_struct["pdb_idx"],
     }
     if parse_hetatom:
-        out["xyz_het"] = target_struct["xyz_het"]
+        out["xyz_het"] = torch.tensor(target_struct["xyz_het"], device=device)
         out["info_het"] = target_struct["info_het"]
     return out
 

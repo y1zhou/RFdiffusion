@@ -15,21 +15,25 @@ from rfdiffusion.util import rigid_from_3_points
 torch.set_printoptions(sci_mode=False)
 
 
-def get_beta_schedule(T, b0, bT, schedule_type, schedule_params=None, inference=False):
+def get_beta_schedule(
+    T, b0, bT, schedule_type, schedule_params=None, inference=False, device="cpu"
+):
     """Given a noise schedule type, create the beta schedule."""
     if schedule_params is None:
         schedule_params = {}
-    assert schedule_type in ["linear"]
 
     # Adjust b0 and bT if T is not 200
     # This is a good approximation, with the beta correction below, unless T is very small
-    assert T >= 15, "With discrete time and T < 15, the schedule is badly approximated"
+    if T < 15:
+        raise ValueError(
+            "With discrete time and T < 15, the schedule is badly approximated"
+        )
     b0 *= 200 / T
     bT *= 200 / T
 
     # linear noise schedule
     if schedule_type == "linear":
-        schedule = torch.linspace(b0, bT, T)
+        schedule = torch.linspace(b0, bT, T, device=device)
 
     else:
         raise NotImplementedError(f"Schedule of type {schedule_type} not implemented.")
@@ -101,11 +105,11 @@ class EuclideanDiffuser:
         # c-alpha crds
         ca_xyz = x[:, 1, :]
 
-        b_t = self.beta_schedule[t_idx]
+        b_t = self.beta_schedule[t_idx].to(x.device)
 
         # get the noise at timestep t
         mean = torch.sqrt(1 - b_t) * ca_xyz
-        var = torch.ones(L, 3) * (b_t) * var_scale
+        var = torch.ones(L, 3, device=x.device) * (b_t) * var_scale
 
         sampled_crds = torch.normal(mean, torch.sqrt(var))
         delta = sampled_crds - ca_xyz
@@ -168,6 +172,7 @@ class IGSO3:
         min_b,
         max_b,
         cache_dir,
+        device: torch.device,
         num_omega=1000,
         schedule="linear",
         L=2000,
@@ -181,11 +186,13 @@ class IGSO3:
             min_b: lower value of beta in Ho schedule analogue
             max_b: upper value of beta in Ho schedule analogue
             cache_dir: directory to store/load the IGSO3 values
+            device: device to run on
             num_omega: discretization level in the angles across [0, pi]
             schedule: currently only linear and exponential are supported.  The exponential schedule may be noising too slowly.
             L: truncation level
         """
         self._log = logging.getLogger(__name__)
+        self.device = device
 
         self.T = T
 
@@ -254,13 +261,16 @@ class IGSO3:
     @property
     def discrete_sigma(self):
         """Returns the discretized sigma values for IGSO(3) initialization."""
-        return self.igso3_vals["discrete_sigma"]
+        return torch.tensor(self.igso3_vals["discrete_sigma"], device=self.device)
 
-    def sigma_idx(self, sigma: np.ndarray):
+    def sigma_idx(self, sigma: torch.Tensor):
         """Calculates the index for discretized sigma during IGSO(3) initialization."""
-        return np.digitize(sigma, self.discrete_sigma) - 1
+        # if isinstance(sigma, torch.Tensor):
+        #     sigma = sigma.detach().cpu().numpy()
+        # return np.digitize(sigma, self.discrete_sigma) - 1
+        return torch.bucketize(sigma, self.discrete_sigma, right=True) - 1
 
-    def t_to_idx(self, t: np.ndarray):
+    def t_to_idx(self, t: torch.Tensor):
         """Helper function to go from discrete time index t to corresponding sigma_idx.
 
         Args:
@@ -276,11 +286,13 @@ class IGSO3:
             t: torch tensor with time between 0 and 1
         """
         if not isinstance(t, torch.Tensor):
-            t = torch.tensor(t)
-        if torch.any(t < 0) or torch.any(t > 1):
+            t = torch.tensor(t, device=self.device)
+        if (t < 0).any() or (t > 1).any():
             raise ValueError(f"Invalid t={t}")
         if self.schedule == "exponential":
-            sigma = t * np.log10(self.max_sigma) + (1 - t) * np.log10(self.min_sigma)
+            sigma = t * torch.log10(self.max_sigma) + (1 - t) * torch.log10(
+                self.min_sigma
+            )
             return 10**sigma
         elif self.schedule == "linear":  # Variance exploding analogue of Ho schedule
             # add self.min_sigma for stability
@@ -306,7 +318,7 @@ class IGSO3:
         Returns:
             drift cooeficient as a scalar.
         """
-        t = torch.tensor(t, requires_grad=True)
+        t = torch.tensor(t, requires_grad=True, device=self.device)
         sigma_sqr = self.sigma(t) ** 2
         grads = torch.autograd.grad(sigma_sqr.sum(), t)[0]
         return torch.sqrt(grads)
@@ -324,7 +336,7 @@ class IGSO3:
         assert sum(ts == 0) == 0, "assumes one-indexed, not zero indexed"
         all_samples = []
         for t in ts:
-            sigma_idx = self.t_to_idx(t)
+            sigma_idx = self.t_to_idx(t).detach().cpu().numpy()
             sample_i = np.interp(
                 np.random.rand(n_samples),
                 self.igso3_vals["cdf"][sigma_idx],
@@ -353,7 +365,7 @@ class IGSO3:
         Return:
             score_norm with same shape as omega
         """
-        sigma_idx = self.t_to_idx(t)
+        sigma_idx = self.t_to_idx(t).detach().cpu().numpy()
         score_norm_t = np.interp(
             omega,
             self.igso3_vals["discrete_omega"],
@@ -383,7 +395,7 @@ class IGSO3:
         for i, t in enumerate(ts):
             omega_t = omega[i]
             # t_idx = t - 1
-            sigma_idx = self.t_to_idx(t)
+            sigma_idx = self.t_to_idx(t).detach().cpu().numpy()
             score_norm_t = np.interp(
                 omega_t,
                 self.igso3_vals["discrete_omega"],
@@ -408,15 +420,15 @@ class IGSO3:
             np.array : N/CA/C coordinates for each residue
                         (T,L,3,3), where T is num timesteps
         """
-        if torch.is_tensor(xyz):
-            xyz = xyz.numpy()
+        if not isinstance(xyz, torch.Tensor):
+            xyz = torch.tensor(xyz, device=self.device)
 
         t = np.arange(self.T) + 1  # 1-indexed!!
         num_res = len(xyz)
 
-        N = torch.from_numpy(xyz[None, :, 0, :])
-        Ca = torch.from_numpy(xyz[None, :, 1, :])  # [1, num_res, 3, 3]
-        C = torch.from_numpy(xyz[None, :, 2, :])
+        N = xyz[None, :, 0, :]
+        Ca = xyz[None, :, 1, :]  # [1, num_res, 3, 3]
+        C = xyz[None, :, 2, :]
 
         # scipy rotation object for true coordinates
         R_true, Ca = rigid_from_3_points(N, Ca, C)
@@ -431,17 +443,17 @@ class IGSO3:
             sampled_rots = sampled_rots * non_diffusion_mask
 
         # Apply sampled rot.
-        R_sampled = (
+        R_sampled = torch.tensor(
             scipy_R.from_rotvec(sampled_rots.reshape(-1, 3))
             .as_matrix()
-            .reshape(self.T, num_res, 3, 3)
+            .reshape(self.T, num_res, 3, 3),
+            device=xyz.device,
+            dtype=torch.float,
         )
-        R_perturbed = np.einsum("tnij,njk->tnik", R_sampled, R_true)
+        R_perturbed = torch.einsum("tnij,njk->tnik", R_sampled, R_true)
         perturbed_crds = (
-            np.einsum(
-                "tnij,naj->tnai", R_sampled, xyz[:, :3, :] - Ca[:, None, ...].numpy()
-            )
-            + Ca[None, :, None].numpy()
+            torch.einsum("tnij,naj->tnai", R_sampled, xyz[:, :3, :] - Ca[:, None, ...])
+            + Ca[None, :, None]
         )
 
         if t_list is not None:
@@ -450,8 +462,8 @@ class IGSO3:
             R_perturbed = R_perturbed[idx]
 
         return (
-            perturbed_crds.transpose(1, 0, 2, 3),  # [L, T, 3, 3]
-            R_perturbed.transpose(1, 0, 2, 3),
+            perturbed_crds.permute(1, 0, 2, 3),  # [L, T, 3, 3]
+            R_perturbed.permute(1, 0, 2, 3),
         )
 
     def reverse_sample_vectorized(
@@ -519,7 +531,7 @@ class IGSO3:
 
         # Compute scaling for score and sampled noise (following Eq 6 of [2])
         continuous_t = t / self.T
-        rot_g = self.g(continuous_t).to(R_0.device)
+        rot_g = self.g(continuous_t)
 
         # Sample and scale noise to add to the rotation perturbation in the
         # SO(3) tangent space.  Since IG-SO(3) is the Brownian motion on SO(3)
@@ -567,6 +579,7 @@ class Diffuser:
         so3_schedule_type,
         so3_type,
         crd_scale,
+        device: torch.device,
         schedule_kwargs=None,
         var_scale=1.0,
         cache_dir=".",
@@ -592,6 +605,7 @@ class Diffuser:
         self.crd_scale = crd_scale
         self.var_scale = var_scale
         self.cache_dir = cache_dir
+        self.device = device
 
         # get backbone frame diffuser
         self.so3_diffuser = IGSO3(
@@ -603,6 +617,7 @@ class Diffuser:
             max_b=max_b,
             cache_dir=self.cache_dir,
             L=truncation_level,
+            device=self.device,
         )
 
         # get backbone translation diffuser
@@ -641,6 +656,7 @@ class Diffuser:
             diffusion_mask = torch.zeros(
                 len(xyz.squeeze()), dtype=torch.bool, device=xyz.device
             )
+        diffusion_mask = diffusion_mask.to(xyz.device)
 
         # get_allatom = ComputeAllAtomCoords().to(device=xyz.device)
         L = len(xyz)
@@ -674,7 +690,9 @@ class Diffuser:
         # 2 get frames
         tick = time.time()
         diffused_frame_crds, diffused_frames = self.so3_diffuser.diffuse_frames(
-            xyz[:, :3, :].clone(), diffusion_mask=diffusion_mask.numpy(), t_list=None
+            xyz[:, :3, :].clone(),
+            diffusion_mask=diffusion_mask.detach().cpu().numpy(),
+            t_list=None,
         )
         diffused_frame_crds /= self.crd_scale
         # print('Time to diffuse frames: ',time.time()-tick)
@@ -684,14 +702,14 @@ class Diffuser:
         cum_delta = deltas.cumsum(dim=1)
         # The coordinates of the translated AND rotated frames
         diffused_BB = (
-            torch.from_numpy(diffused_frame_crds) + cum_delta[:, :, None, :]
+            torch.tensor(diffused_frame_crds) + cum_delta[:, :, None, :]
         ).transpose(0, 1)  # [n,L,3,3]
         # diffused_BB  = torch.from_numpy(diffused_frame_crds).transpose(0,1)
 
         # diffused_BB is [t_steps,L,3,3]
         t_steps, L = diffused_BB.shape[:2]
 
-        diffused_fa = torch.zeros(t_steps, L, 27, 3)
+        diffused_fa = torch.zeros(t_steps, L, 27, 3, device=self.device)
         diffused_fa[:, :, :3, :] = diffused_BB
 
         # Add in sidechains from motif
